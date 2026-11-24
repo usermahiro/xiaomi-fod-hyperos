@@ -266,8 +266,6 @@ pub struct FingerprintHal {
     /// not by the framework. The framework does not know about it and never cancels it.
     auto_session: AtomicBool,
     auto_session_at: Mutex<Option<std::time::Instant>>,
-    in_enroll: AtomicBool,
-    last_touch_at: Mutex<Option<std::time::Instant>>,
     is_finger_down: AtomicBool,
     current_user_id: std::sync::atomic::AtomicI32,
     enumerated_ids: Mutex<Vec<i32>>,
@@ -596,8 +594,6 @@ impl FingerprintHal {
             is_active: AtomicBool::new(false),
             auto_session: AtomicBool::new(false),
             auto_session_at: Mutex::new(None),
-            in_enroll: AtomicBool::new(false),
-            last_touch_at: Mutex::new(None),
             is_finger_down: AtomicBool::new(false),
             current_user_id: std::sync::atomic::AtomicI32::new(0),
             enumerated_ids: Mutex::new(Vec::new()),
@@ -832,7 +828,6 @@ impl FingerprintHal {
 
     pub fn enroll(&self, hat: &hw_auth_token_t, timeout_sec: u32) -> i32 {
         self.auto_session.store(false, Ordering::SeqCst);
-        self.in_enroll.store(true, Ordering::SeqCst);
         self.step_captured.store(false, Ordering::SeqCst);
         self.saved_enroll_fid.store(0, Ordering::SeqCst);
         // A new operation must never inherit a lit panel from the previous one.
@@ -901,7 +896,6 @@ impl FingerprintHal {
 
     pub fn authenticate(&self, operation_id: u64) -> i32 {
         self.auto_session.store(false, Ordering::SeqCst);
-        self.in_enroll.store(false, Ordering::SeqCst);
         // Do NOT clear HBM here. On MIUI the framework often calls authenticate()
         // *after* the SOFOD touch already lit the panel; clearing it here kills
         // the illumination right before Goodix captures. Session end / finger-up
@@ -978,9 +972,9 @@ impl FingerprintHal {
     }
 
     pub fn get_screen_state(&self) -> i32 {
-        // Authoritative signal: DRM DPMS. The stored value can get stuck at 0
-        // after a sleep/wake cycle (MIUI never sends cmd 1011 to reset it),
-        // which made HBM fire while the user was scrolling with the screen on.
+        // MIUI never sends ColorOS custom cmd 1011 (notifyScreenStateToHal),
+        // so the stored value stays 1 forever. Derive "off" from the panel
+        // itself instead: deep sleep (DPMS Off) must be 0 or SOFOD is skipped.
         if Self::is_display_dpms_on() {
             1
         } else {
@@ -989,9 +983,9 @@ impl FingerprintHal {
     }
 
     pub fn is_display_dpms_on() -> bool {
-        // On this MTK/Transsion panel DRM dpms stays "On" even in doze.
-        // The FTS touch controller flips Reg(0xD0) to 1 exactly when the
-        // panel enters screen-off gesture mode. That is the reliable signal.
+        // DRM dpms stays "On" during doze on this port. The FTS controller
+        // Reg(0xD0)=1 only in screen-off gesture mode -> use it as the
+        // authoritative screen state; fall back to DRM if unavailable.
         if let Ok(s) = std::fs::read_to_string(
             "/sys/class/input/event4/device/device/fts_gesture_mode",
         ) {
@@ -1047,7 +1041,6 @@ impl FingerprintHal {
             }
         }
         self.is_active.store(false, Ordering::SeqCst);
-        self.in_enroll.store(false, Ordering::SeqCst);
                 self.auto_session.store(false, Ordering::SeqCst);
     }
 
@@ -1127,10 +1120,48 @@ impl FingerprintHal {
     }
 
     // Touch & Optical Illumination Callbacks
-    fn emit_hbm_capture(&self, x: i32, y: i32, _screen_state: i32) {
+    pub fn on_pointer_down(&self, x: i32, y: i32, _minor: f32, _major: f32) {
+        // Calibrate touch boundary: reject any touch outside the calibrated FOD sensor circle
+        // (x == 0 && y == 0 is preserved as a special fallback for hardware gesture keys without coordinates)
+        if (x != 0 || y != 0) && !crate::input::is_inside_fod_area(x, y) {
+            log_info!(
+                "on_pointer_down at ({}, {}) rejected: outside calibrated FOD area (center: {}, {}, radius: {})",
+                x, y, crate::input::FOD_CENTER_X, crate::input::FOD_CENTER_Y, crate::input::FOD_TOUCH_RADIUS
+            );
+            return;
+        }
+
+        let screen_state = self.get_screen_state();
+
+        // Guard: a session that this HAL started itself (SOFOD) is only valid while the
+        // screen is off/doze. Once the screen is ON the framework owns FOD: a leftover
+        // auto session must not light HBM when the sensor area is touched in an app.
+        if self.is_active() && screen_state == 1 && self.auto_session_stale(AUTO_SESSION_GRACE_MS) {
+            log_info!("on_pointer_down ignored: stale HAL-started session while screen is ON");
+            self.end_auto_session("screen is ON", AUTO_SESSION_GRACE_MS);
+            return;
+        }
+
+        if !self.is_active() {
+            if screen_state == 1 {
+                log_debug!("on_pointer_down while inactive and screen is ON -> ignored");
+                return;
+            }
+            log_info!("on_pointer_down while inactive (screen_state={}) -> auto-starting authenticate for SOFOD", screen_state);
+            self.start_auto_authenticate();
+        }
+
+        self.finger_held.store(true, Ordering::SeqCst);
+        if self.is_finger_down.swap(true, Ordering::SeqCst) {
+            log_debug!("Duplicate pointer_down ignored");
+            return;
+        }
         self.step_captured.store(false, Ordering::SeqCst);
         self.auth_rearm_count.store(0, Ordering::SeqCst);
-        log_info!("FOD capture at ({}, {}) -> activating HBM", x, y);
+        log_info!(
+            "on_pointer_down at ({}, {}) (screen_state={}) -> activating HBM & optical capture",
+            x, y, screen_state
+        );
 
         // 1. Notify framework touch start (standard AIDL AcquiredInfo::START)
         if let Some(cb) = self.current_callback.lock().as_ref() {
@@ -1142,7 +1173,9 @@ impl FingerprintHal {
         self.notify_framework_touch(true);
 
         // Acquire wake lock if screen is not awake to keep CPU running during display transition
-        crate::input::acquire_wakelock("oplus_udfps_fod_wake");
+        if screen_state != 1 {
+            crate::input::acquire_wakelock("oplus_udfps_fod_wake");
+        }
 
         // 3. Activate HBM. The MTK node has no boolean read-back (it always
         //    reports 0xFA), so waiting for a confirmation only burns ~500ms of
@@ -1153,7 +1186,9 @@ impl FingerprintHal {
         if !self.is_finger_down.load(Ordering::SeqCst) {
             log_info!("Finger lifted during optical sync delay, aborting capture");
             crate::hbm::set_hbm(false);
-            crate::input::release_wakelock("oplus_udfps_fod_wake");
+            if self.get_screen_state() == 0 {
+                crate::input::release_wakelock("oplus_udfps_fod_wake");
+            }
             return;
         }
 
@@ -1164,7 +1199,9 @@ impl FingerprintHal {
         if !self.is_finger_down.load(Ordering::SeqCst) {
             log_info!("Finger lifted during settling delay, aborting capture");
             crate::hbm::set_hbm(false);
-            crate::input::release_wakelock("oplus_udfps_fod_wake");
+            if self.get_screen_state() == 0 {
+                crate::input::release_wakelock("oplus_udfps_fod_wake");
+            }
             return;
         }
 
@@ -1179,80 +1216,6 @@ impl FingerprintHal {
         } else if let Some(msg_send) = self.fn_silfp_msg_send {
             unsafe { msg_send(2) }; // FINGER_DOWN = 2
         }
-    }
-
-    /// SOFOD entry for the hardware FOD gesture key (KEY 195 / KEY_GESTURE_38).
-    /// That key is emitted only while the panel is in gesture mode -> the
-    /// screen IS off, even when DRM DPMS still reports "On" in early doze.
-    pub fn on_pointer_down_sofod(&self, x: i32, y: i32) {
-        if (x != 0 || y != 0) && !crate::input::is_inside_fod_area(x, y) {
-            return;
-        }
-        {
-            let mut last = self.last_touch_at.lock();
-            if let Some(t) = *last {
-                if t.elapsed().as_millis() < 300 {
-                    return;
-                }
-            }
-            *last = Some(std::time::Instant::now());
-        }
-        if self.is_finger_down.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        self.finger_held.store(true, Ordering::SeqCst);
-        if !self.in_enroll.load(Ordering::SeqCst) && !self.is_active() {
-            log_info!("SOFOD gesture: starting auth immediately (screen off confirmed by KEY 195)");
-            self.start_auto_authenticate();
-        }
-        self.emit_hbm_capture(x, y, 0);
-    }
-
-    pub fn on_pointer_down(&self, x: i32, y: i32, _minor: f32, _major: f32) {
-        // Calibrate touch boundary: reject any touch outside the calibrated FOD sensor circle
-        // (x == 0 && y == 0 is preserved as a special fallback for hardware gesture keys without coordinates)
-        if (x != 0 || y != 0) && !crate::input::is_inside_fod_area(x, y) {
-            log_info!(
-                "on_pointer_down at ({}, {}) rejected: outside calibrated FOD area (center: {}, {}, radius: {})",
-                x, y, crate::input::FOD_CENTER_X, crate::input::FOD_CENTER_Y, crate::input::FOD_TOUCH_RADIUS
-            );
-            return;
-        }
-
-        // One physical touch may be reported by several input branches (KEY 195,
-        // SYN_REPORT, KEY_F20). Debounce + dedup BEFORE touching session state.
-        {
-            let mut last = self.last_touch_at.lock();
-            if let Some(t) = *last {
-                if t.elapsed().as_millis() < 350 {
-                    log_debug!("on_pointer_down debounced (<350ms)");
-                    return;
-                }
-            }
-            *last = Some(std::time::Instant::now());
-        }
-        if self.is_finger_down.swap(true, Ordering::SeqCst) {
-            log_debug!("Duplicate pointer_down ignored");
-            return;
-        }
-        self.finger_held.store(true, Ordering::SeqCst);
-
-        let screen_state = self.get_screen_state();
-
-        // Screen ON: framework owns FOD. Our input monitor must never light HBM.
-        if screen_state == 1 {
-            log_debug!("on_pointer_down while screen is ON -> ignored (no HBM)");
-            return;
-        }
-
-        // Screen OFF: start SOFOD auth if no session / no real enrol session.
-        // Do NOT call cancel() here — the vendor's delayed CANCELED notification
-        // would kill the session we just started (seen as Error(5)).
-        if !self.in_enroll.load(Ordering::SeqCst) && !self.is_active() {
-            log_info!("on_pointer_down (screen_state={}) -> starting SOFOD auth", screen_state);
-            self.start_auto_authenticate();
-        }
-        self.emit_hbm_capture(x, y, screen_state);
     }
 
     pub fn on_pointer_up(&self) {
@@ -1520,13 +1483,6 @@ impl FingerprintHal {
             }
             FINGERPRINT_ERROR => {
                 let err_code = unsafe { *(msg.data.as_ptr() as *const i32) };
-                // A late CANCELED (vendorCode 0) is usually the echo of OUR OWN
-                // cancel() from the previous touch. Letting it clear is_active
-                // kills the new session and leaves HBM lit with no capture.
-                if err_code == FINGERPRINT_ERROR_CANCELED {
-                    log_debug!("Ignoring vendor CANCELED echo");
-                    return;
-                }
                 self.is_finger_down.store(false, Ordering::SeqCst);
                 crate::hbm::set_hbm(false);
                 self.is_active.store(false, Ordering::SeqCst);

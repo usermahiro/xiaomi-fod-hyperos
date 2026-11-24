@@ -141,18 +141,19 @@ time by the wrapper's build script) — `/data/local/tmp` is only for testing.
 under Apache-2.0.
 
 
-## Screen-off state signal (important)
-DRM `/sys/class/drm/card0-DSI-1/dpms` stays **On** even in doze on this MTK/Transsion port.
-The reliable indicator is the FTS touch controller node:
+## Screen-off state (verified)
+`Reg(0xD0)` in `/sys/class/input/event4/device/device/fts_gesture_mode` is the
+authoritative signal on this MTK/Transsion port (`0` = screen on, `1` = doze).
+DRM DPMS stays "On" during doze, so it cannot be used. The wrapper derives
+screen state from this node, so SOFOD responds immediately with no ColorOS
+cmd 1011 and HBM never lights while the screen is on / while scrolling.
 
-```
-/sys/class/input/event4/device/device/fts_gesture_mode
-  Reg(0xD0)=0  -> screen ON  (no HBM on sensor touch)
-  Reg(0xD0)=1  -> screen OFF / gesture mode (SOFOD active)
-```
+## Division of responsibility
+- `fp_bridge` (AIDL IFingerprint wrapper) owns HBM and FOD key injection.
+  One touch = one KEY 0xC3 capture, no OPlus hold-rearm / retry spam.
+- `xiaomi_fod_hal` only exposes the MIUI vendor binder services
+  (`IXiaomiFingerprint`, `ITouchFeature`). It does not drive HBM or inject keys;
+  doing so caused HBM to light while scrolling with a stale session.
 
-- The wrapper derives screen state from `Reg(0xD0)`; no ColorOS cmd 1011 needed.
-- The shim (`xiaomi_fod_hal`) only exposes MIUI vendor binder services. It no
-  longer drives HBM or injects FOD keys — that caused HBM to light while
-  scrolling with a stale session. The wrapper is the sole HBM/key owner.
-- One touch = one KEY 0xC3 refire (debounced 300 ms, no OPlus hold-rearm).
+Verified: screen-off tap produces `Authentication SUCCEEDED`; screen-on tap
+produces no HBM activity.
