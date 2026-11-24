@@ -1,0 +1,6 @@
+service xiaomi_fod_hal /vendor/bin/hw/xiaomi_fod_hal
+    class late_start
+    user system
+    group system input
+    interface aidl vendor.xiaomi.hardware.fingerprintextension.IXiaomiFingerprint/default
+    interface aidl vendor.xiaomi.hw.touchfeature.ITouchFeature/default

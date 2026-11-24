@@ -1,0 +1,28 @@
+service vendor.fingerprint-default /vendor/bin/hw/android.hardware.biometrics.fingerprint-service.transsion default
+    class hal
+    user system
+    group system input uhid wakelock
+    capabilities BLOCK_SUSPEND WAKE_ALARM
+    interface aidl android.hardware.biometrics.fingerprint.IFingerprint/default
+    writepid /dev/cpuset/system-background/tasks
+
+on early-boot
+    setprop vendor.fingerprint.aidl.support 1
+    setprop persist.sys.block.fingerprint false
+
+on post-fs-data
+    setprop vendor.fingerprint.aidl.support 1
+    setprop persist.sys.block.fingerprint false
+    # Lives in /data/property and is wiped by a format data. Without it SystemUI
+    # falls back to the rear fingerprint layout while the sensor keeps working,
+    # because this HAL's touch target is a constant. The HAL also enforces it at
+    # startup; this line covers the case where SELinux denies the HAL's write.
+    setprop persist.vendor.fingerprint.sensor_type optical
+    mkdir /data/vendor_de/0/fpdata 0700 system system
+    write /proc/fingerprint_status 1
+    write /proc/gesture_function fp1
+    chmod 0666 /sys/class/input/event4/device/device/fts_gesture_mode
+    chmod 0666 /sys/class/input/event3/device/device/fts_gesture_mode
+
+on property:sys.boot_completed=1
+    start vendor.fingerprint-default
