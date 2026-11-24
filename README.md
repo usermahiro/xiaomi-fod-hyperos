@@ -55,6 +55,8 @@ those as session bookkeeping and they can outlive the actual touch. Instead:
   press came in within the hold window.
 * One press = one capture attempt. No hold-re-arm / duplicate auth.
 * Screen state is derived from DRM DPMS, not ColorOS custom cmd 1011 (MIUI never sends it). SOFOD works after the panel enters deep sleep.
+* Re-issue one KEY 0xC3 DOWN after HBM is lit: Goodix only captures on that key, and in deep sleep the kernel FOD key fires before a session exists. Single refire, 350 ms hold — no repeated re-arm.
+* `authenticate()` no longer clears HBM (MIUI may call it after the touch already lit the panel).
 * Startup always clears HBM.
 
 Node: `/sys/kernel/tran_display/lcm_hbm_state`. Reading it returns a hex

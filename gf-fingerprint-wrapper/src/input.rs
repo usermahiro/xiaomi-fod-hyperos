@@ -23,8 +23,8 @@ pub const SYN_REPORT: u16 = 0;
 
 pub const SOFOD_TID: i32 = 900;
 pub const SOFOD_MAJOR: i32 = 80;
-pub const SOFOD_DELAY_MS: u64 = 20;
-pub const SOFOD_HOLD_MS: u64 = 1000;
+pub const SOFOD_DELAY_MS: u64 = 10;
+pub const SOFOD_HOLD_MS: u64 = 350;
 
 // Calibrated Optical FOD Sensor Location & Touch Target for Transsion Camon 30 Pro (1080x2436)
 // Hardware property persist.vendor.fingerprint.optical.sensorlocation: [540::2172], diameter: 228 (radius: 114)
@@ -702,7 +702,12 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                                                             }
                                                             if !crate::hal::FingerprintHal::is_display_dpms_on() {
                                                                 wake_display_pipeline();
-                                                                std::thread::sleep(std::time::Duration::from_millis(60));
+                                                                // Wait for the DRM pipeline to actually come up before
+                                                                // writing HBM; 60ms was too short on deep sleep.
+                                                                for _ in 0..40 {
+                                                                    if crate::hal::FingerprintHal::is_display_dpms_on() { break; }
+                                                                    std::thread::sleep(std::time::Duration::from_millis(25));
+                                                                }
                                                             }
                                                             acquire_wakelock("oplus_udfps_fod_wake");
                                                             log_info!(
@@ -712,6 +717,9 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                                                             is_down = true;
                                                             last_down_time = std::time::Instant::now();
                                                             hal.on_pointer_down(tx, ty, 0.0, 0.0);
+                                                            // Goodix captures only on KEY 0xC3 DOWN. The kernel FOD key in deep
+                                                            // sleep fires before a session exists -> re-trigger now that HBM is on.
+                                                            refire_sofod_touch(tx, ty, &path);
                                                         } else {
                                                             log_info!(
                                                                 "FOD touch rejected at ({}, {}): outside calibrated FOD area (KEY {})",
@@ -743,6 +751,10 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                                                         if !crate::hal::FingerprintHal::is_display_dpms_on() {
                                                             wake_display_pipeline();
                                                             std::thread::sleep(std::time::Duration::from_millis(60));
+                                                            for _ in 0..40 {
+                                                                if crate::hal::FingerprintHal::is_display_dpms_on() { break; }
+                                                                std::thread::sleep(std::time::Duration::from_millis(25));
+                                                            }
                                                         }
                                                         acquire_wakelock("oplus_udfps_fod_wake");
                                                         log_info!(
@@ -752,6 +764,9 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                                                         is_down = true;
                                                         last_down_time = std::time::Instant::now();
                                                         hal.on_pointer_down(tx, ty, 0.0, 0.0);
+                                                        // Goodix captures only on KEY 0xC3 DOWN. The kernel FOD key in deep
+                                                        // sleep fires before a session exists -> re-trigger now that HBM is on.
+                                                        refire_sofod_touch(tx, ty, &path);
                                                     }
                                                 }
                                             }
@@ -784,6 +799,10 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                                                 if !crate::hal::FingerprintHal::is_display_dpms_on() {
                                                     wake_display_pipeline();
                                                     std::thread::sleep(std::time::Duration::from_millis(60));
+                                                    for _ in 0..40 {
+                                                        if crate::hal::FingerprintHal::is_display_dpms_on() { break; }
+                                                        std::thread::sleep(std::time::Duration::from_millis(25));
+                                                    }
                                                 }
                                                 log_info!("FOD touch coordinate confirmed via SYN_REPORT at ({}, {}) -> activating HBM and capture", cur_x, cur_y);
                                                 is_down = true;

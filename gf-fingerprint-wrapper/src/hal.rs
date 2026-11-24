@@ -896,8 +896,10 @@ impl FingerprintHal {
 
     pub fn authenticate(&self, operation_id: u64) -> i32 {
         self.auto_session.store(false, Ordering::SeqCst);
-        // A new operation must never inherit a lit panel from the previous one.
-        crate::hbm::set_hbm(false);
+        // Do NOT clear HBM here. On MIUI the framework often calls authenticate()
+        // *after* the SOFOD touch already lit the panel; clearing it here kills
+        // the illumination right before Goodix captures. Session end / finger-up
+        // and the watchdog are the only places that turn HBM off.
         if self.is_goodix {
             let dev = unsafe { &mut *(self.device as *mut goodix_fingerprint_device_t) };
             if let Some(auth_fn) = dev.authenticate {
