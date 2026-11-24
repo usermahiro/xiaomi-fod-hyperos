@@ -970,6 +970,12 @@ impl FingerprintHal {
     }
 
     pub fn get_screen_state(&self) -> i32 {
+        // MIUI never sends ColorOS custom cmd 1011 (notifyScreenStateToHal),
+        // so the stored value stays 1 forever. Derive "off" from the panel
+        // itself instead: deep sleep (DPMS Off) must be 0 or SOFOD is skipped.
+        if !Self::is_display_dpms_on() {
+            return 0;
+        }
         self.screen_state.load(Ordering::SeqCst)
     }
 

@@ -362,37 +362,18 @@ static LOGO_HOLD_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// Wakelock ditahan SOFOD_LOGO_HOLD_MS supaya layar/logo tidak langsung padam.
 /// Return true kalau event ini sudah ditangani (caller skip jalur capture lama).
 pub fn try_screen_off_wake_only(
-    hal: &Arc<crate::hal::FingerprintHal>,
-    fired: &mut bool,
-    pending: &mut Option<(std::time::Instant, i32, i32)>,
-    x: i32,
-    y: i32,
+    _hal: &Arc<crate::hal::FingerprintHal>,
+    _fired: &mut bool,
+    _pending: &mut Option<(std::time::Instant, i32, i32)>,
+    _x: i32,
+    _y: i32,
 ) -> bool {
-    let screen_off = hal.get_screen_state() == 0 || !crate::hal::FingerprintHal::is_display_dpms_on();
-    if !screen_off {
-        return false;
-    }
-    if *fired {
-        // sentuhan yang sama masih ditahan, jangan wake berulang
-        return true;
-    }
-    *fired = true;
-
-    log_info!("SOFOD fake: sensor pressed while screen off -> KEY_WAKEUP, auto-capture after display on (logo hold {}ms)", SOFOD_LOGO_HOLD_MS);
-    wake_display_pipeline();
-    *pending = Some((std::time::Instant::now(), x, y));
-
-    acquire_wakelock("oplus_udfps_logo_hold");
-    let gen = LOGO_HOLD_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(SOFOD_LOGO_HOLD_MS));
-        if LOGO_HOLD_GEN.load(std::sync::atomic::Ordering::SeqCst) == gen {
-            release_wakelock("oplus_udfps_logo_hold");
-            log_info!("SOFOD wake-only: logo hold ended ({}ms)", SOFOD_LOGO_HOLD_MS);
-        }
-    });
-    true
+    // Disabled on MIUI. Deferring capture until after KEY_WAKEUP made HBM
+    // light up too late (or not at all) once the panel had gone to deep sleep.
+    // The normal path now wakes the display pipeline and lights HBM directly.
+    false
 }
+
 
 static SOFOD_REFIRE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SOFOD_REFIRE_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
