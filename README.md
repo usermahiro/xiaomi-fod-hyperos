@@ -139,3 +139,20 @@ time by the wrapper's build script) — `/data/local/tmp` is only for testing.
 `gf-fingerprint-wrapper/` is adapted from
 [usermahiro/Oplus-UDFPS-Bridge-Transsion](https://github.com/usermahiro/Oplus-UDFPS-Bridge-Transsion)
 under Apache-2.0.
+
+
+## Screen-off state signal (important)
+DRM `/sys/class/drm/card0-DSI-1/dpms` stays **On** even in doze on this MTK/Transsion port.
+The reliable indicator is the FTS touch controller node:
+
+```
+/sys/class/input/event4/device/device/fts_gesture_mode
+  Reg(0xD0)=0  -> screen ON  (no HBM on sensor touch)
+  Reg(0xD0)=1  -> screen OFF / gesture mode (SOFOD active)
+```
+
+- The wrapper derives screen state from `Reg(0xD0)`; no ColorOS cmd 1011 needed.
+- The shim (`xiaomi_fod_hal`) only exposes MIUI vendor binder services. It no
+  longer drives HBM or injects FOD keys — that caused HBM to light while
+  scrolling with a stale session. The wrapper is the sole HBM/key owner.
+- One touch = one KEY 0xC3 refire (debounced 300 ms, no OPlus hold-rearm).

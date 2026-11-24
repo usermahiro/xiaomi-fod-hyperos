@@ -85,10 +85,11 @@ fn write_hbm(on: bool, reason: &str) {
 }
 
 fn arm(reason: &str) {
+    // The AIDL fingerprint wrapper owns HBM. The shim only exposes the
+    // MIUI vendor binder services; driving the panel here lit HBM while the
+    // user was just scrolling with a stale session.
     LAST_DOWN_MS.store(now_ms(), Ordering::SeqCst);
-    if !HBM_ON.load(Ordering::SeqCst) {
-        write_hbm(true, reason);
-    }
+    tracing::debug!("[HBM] arm skipped ({reason}) - owned by fp_bridge");
 }
 
 fn disarm(reason: &str) {
@@ -143,6 +144,8 @@ struct InputEvent {
 }
 
 fn inject_fod_key(value: i32) {
+    return; // wrapper is the sole FOD-key injector
+    #[allow(unreachable_code)]
     if now_ms().saturating_sub(LAST_FOD_KEY_MS.load(Ordering::SeqCst)) < 250 {
         return; // kernel already emitted it
     }

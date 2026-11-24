@@ -621,6 +621,7 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                 let mut is_down = false;
                 let mut last_down_time = std::time::Instant::now();
                 let mut last_rearm_time = std::time::Instant::now();
+                let mut prev_screen_off = false;
                 let mut cur_x: i32 = -1;
                 let mut cur_y: i32 = -1;
                 let mut touch_active = false;
@@ -631,11 +632,22 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                 let mut buf = vec![0u8; event_size * 16];
 
                 loop {
-                    if last_rearm_time.elapsed() >= std::time::Duration::from_secs(3) {
+                    // Enable FOD gesture mode the INSTANT the panel goes to sleep.
+                    // MIUI never sends ColorOS cmd 1011, so set_screen_state() is
+                    // never called by the framework and the touch controller stays
+                    // in normal mode until our old 3s timer fired -> slow enroll.
+                    let screen_off_now = hal.get_screen_state() == 0;
+                    if screen_off_now && !prev_screen_off {
+                        log_info!("Screen went OFF -> arming FOD gesture + notifying vendor HAL immediately");
+                        hal.set_screen_state(0);
+                        prev_screen_off = true;
                         last_rearm_time = std::time::Instant::now();
-                        if hal.get_screen_state() == 0 {
-                            ensure_gesture_fod_enabled();
-                        }
+                    } else if !screen_off_now {
+                        prev_screen_off = false;
+                    }
+                    if screen_off_now && last_rearm_time.elapsed() >= std::time::Duration::from_millis(200) {
+                        last_rearm_time = std::time::Instant::now();
+                        ensure_gesture_fod_enabled();
                     }
 
                     let mut pfd = libc::pollfd {
@@ -696,19 +708,12 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
 
                                                 match target {
                                                     Some((tx, ty)) => {
-                                                        if is_inside_fod_area(tx, ty) {
-                                                            if try_screen_off_wake_only(&hal, &mut wake_fired, &mut pending_capture, tx, ty) {
-                                                                continue;
-                                                            }
-                                                            if !crate::hal::FingerprintHal::is_display_dpms_on() {
-                                                                wake_display_pipeline();
-                                                                // Wait for the DRM pipeline to actually come up before
-                                                                // writing HBM; 60ms was too short on deep sleep.
-                                                                for _ in 0..40 {
-                                                                    if crate::hal::FingerprintHal::is_display_dpms_on() { break; }
-                                                                    std::thread::sleep(std::time::Duration::from_millis(25));
-                                                                }
-                                                            }
+                                                        if is_inside_fod_area(tx, ty)
+                                                            && !crate::hal::FingerprintHal::is_display_dpms_on()
+                                                        {
+                                                            // Do NOT inject KEY_WAKEUP here. PowerManager treats it as
+                                                            // WAKE_REASON_WAKE_KEY -> stopDozing -> MIUI tears down the
+                                                            // FOD icon/enrol UI. HBM writes work fine in deep sleep.
                                                             acquire_wakelock("oplus_udfps_fod_wake");
                                                             log_info!(
                                                                 "FOD touch detected in sleep at ({}, {}) (KEY {}, screen_state={}) -> activating HBM and capture",
@@ -716,7 +721,7 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                                                             );
                                                             is_down = true;
                                                             last_down_time = std::time::Instant::now();
-                                                            hal.on_pointer_down(tx, ty, 0.0, 0.0);
+                                                            hal.on_pointer_down_sofod(tx, ty);
                                                             // Goodix captures only on KEY 0xC3 DOWN. The kernel FOD key in deep
                                                             // sleep fires before a session exists -> re-trigger now that HBM is on.
                                                             refire_sofod_touch(tx, ty, &path);
@@ -744,18 +749,13 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                                                     get_fts_gesture_point()
                                                 };
                                                 if let Some((tx, ty)) = target {
-                                                    if is_inside_fod_area(tx, ty) {
+                                                    if is_inside_fod_area(tx, ty)
+                                                        && !crate::hal::FingerprintHal::is_display_dpms_on()
+                                                    {
                                                         if try_screen_off_wake_only(&hal, &mut wake_fired, &mut pending_capture, tx, ty) {
                                                             continue;
                                                         }
-                                                        if !crate::hal::FingerprintHal::is_display_dpms_on() {
-                                                            wake_display_pipeline();
-                                                            std::thread::sleep(std::time::Duration::from_millis(60));
-                                                            for _ in 0..40 {
-                                                                if crate::hal::FingerprintHal::is_display_dpms_on() { break; }
-                                                                std::thread::sleep(std::time::Duration::from_millis(25));
-                                                            }
-                                                        }
+                                                        // No KEY_WAKEUP: would stop dozing and kill the FOD enrol UI.
                                                         acquire_wakelock("oplus_udfps_fod_wake");
                                                         log_info!(
                                                             "FOD gesture pulse detected in sleep at ({}, {}) (KEY {}, screen_state={}) -> activating HBM and capture",
@@ -763,7 +763,7 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                                                         );
                                                         is_down = true;
                                                         last_down_time = std::time::Instant::now();
-                                                        hal.on_pointer_down(tx, ty, 0.0, 0.0);
+                                                        hal.on_pointer_down_sofod(tx, ty);
                                                         // Goodix captures only on KEY 0xC3 DOWN. The kernel FOD key in deep
                                                         // sleep fires before a session exists -> re-trigger now that HBM is on.
                                                         refire_sofod_touch(tx, ty, &path);
@@ -796,14 +796,7 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                                                 if try_screen_off_wake_only(&hal, &mut wake_fired, &mut pending_capture, cur_x, cur_y) {
                                                     continue;
                                                 }
-                                                if !crate::hal::FingerprintHal::is_display_dpms_on() {
-                                                    wake_display_pipeline();
-                                                    std::thread::sleep(std::time::Duration::from_millis(60));
-                                                    for _ in 0..40 {
-                                                        if crate::hal::FingerprintHal::is_display_dpms_on() { break; }
-                                                        std::thread::sleep(std::time::Duration::from_millis(25));
-                                                    }
-                                                }
+                                                // No KEY_WAKEUP: would stop dozing and kill the FOD enrol UI.
                                                 log_info!("FOD touch coordinate confirmed via SYN_REPORT at ({}, {}) -> activating HBM and capture", cur_x, cur_y);
                                                 is_down = true;
                                                 last_down_time = std::time::Instant::now();
