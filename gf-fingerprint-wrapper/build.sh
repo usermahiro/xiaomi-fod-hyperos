@@ -186,9 +186,10 @@ log_info "Using Cargo: $CARGO_BIN"
 
 cd "$SCRIPT_DIR"
 
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 if [ "$PROFILE" = "release" ]; then
     "$CARGO_BIN" build --target aarch64-linux-android --release
-    BIN="target/aarch64-linux-android/release/android-hardware-biometrics-fingerprint-service-transsion"
+    BIN="$TARGET_DIR/aarch64-linux-android/release/android-hardware-biometrics-fingerprint-service-transsion"
     if [ -x "$STRIP" ]; then
         log_info "Stripping release binary..."
         "$STRIP" "$BIN"
@@ -198,7 +199,7 @@ if [ "$PROFILE" = "release" ]; then
     fi
 else
     "$CARGO_BIN" build --target aarch64-linux-android
-    BIN="target/aarch64-linux-android/debug/android-hardware-biometrics-fingerprint-service-transsion"
+    BIN="$TARGET_DIR/aarch64-linux-android/debug/android-hardware-biometrics-fingerprint-service-transsion"
 fi
 else
     PROFILE="${PROFILE:-release}"

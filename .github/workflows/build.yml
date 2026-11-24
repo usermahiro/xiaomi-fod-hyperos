@@ -1,0 +1,152 @@
+name: Build FOD bridge + shim
+
+on:
+  push:
+    branches: [master, main]
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: "Tandai release sebagai pre-release"
+        type: boolean
+        default: false
+      delay_us:
+        description: "Jeda pengganti uevent libgf_hal (mikrodetik)"
+        type: string
+        default: "30000"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fod-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VERSION_MAJOR_MINOR: "1.0"
+  API_LEVEL: "31"
+  NDK_VERSION: "27.2.12479018"
+  FOD_DELAY_US: ${{ inputs.delay_us || '30000' }}
+
+jobs:
+  wrapper:
+    name: Build fingerprint HAL wrapper
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        id: ver
+        run: |
+          V="${VERSION_MAJOR_MINOR}.${{ github.run_number }}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          sed -i "0,/^version = \".*\"/s//version = \"$V\"/" gf-fingerprint-wrapper/Cargo.toml
+          grep -m1 '^version' gf-fingerprint-wrapper/Cargo.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gf-fingerprint-wrapper
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager --install "ndk;${NDK_VERSION}" > /dev/null
+          NDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/ndk/${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_LATEST_HOME=$NDK" >> "$GITHUB_ENV"
+
+      - name: Build
+        working-directory: gf-fingerprint-wrapper
+        run: bash build.sh release
+
+      - name: Prepare package
+        working-directory: gf-fingerprint-wrapper
+        run: |
+          mkdir -p dist
+          cp out/transsion-vendor-fod-package.zip    "dist/transsion-vendor-fod-package-v${VERSION}.zip"
+          cp out/transsion-vendor-fod-package.tar.gz "dist/transsion-vendor-fod-package-v${VERSION}.tar.gz"
+          TOP=$(unzip -Z1 "dist/transsion-vendor-fod-package-v${VERSION}.zip" | cut -d/ -f1 | sort -u | tr '\n' ' ')
+          echo "Top-level: $TOP"
+          [ "$TOP" = "vendor " ] || [ "$TOP" = "odm vendor " ] \
+            || { echo "::error::Layout paket salah: $TOP"; exit 1; }
+          for f in vendor/bin/hw/android.hardware.biometrics.fingerprint-service.transsion \
+                   vendor/etc/init/android.hardware.biometrics.fingerprint-service.transsion.rc \
+                   vendor/etc/vintf/manifest/manifest_fingerprint_transsion.xml; do
+            unzip -Z1 "dist/transsion-vendor-fod-package-v${VERSION}.zip" | grep -qx "$f" \
+              || { echo "::error::File wajib tidak ada: $f"; exit 1; }
+          done
+          (cd dist && sha256sum * > "SHA256SUMS-v${VERSION}.txt")
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fod-wrapper-v${{ steps.ver.outputs.version }}
+          path: gf-fingerprint-wrapper/dist/*
+          if-no-files-found: error
+
+  shim:
+    name: Build MIUI vendor shim
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: xiaomi-fod-hal
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager --install "ndk;${NDK_VERSION}" > /dev/null
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT:-$ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build
+        working-directory: xiaomi-fod-hal
+        run: bash build.sh release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xiaomi_fod_hal
+          path: xiaomi-fod-hal/target/aarch64-linux-android/release/xiaomi_fod_hal
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [wrapper, shim]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Build checksums
+        run: |
+          V="${VERSION_MAJOR_MINOR}.${{ github.run_number }}"
+          (cd dist && sha256sum * > "SHA256SUMS-all-v${V}.txt")
+          ls -lh dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION_MAJOR_MINOR }}.${{ github.run_number }}
+          name: "FOD bridge + MIUI shim v${{ env.VERSION_MAJOR_MINOR }}.${{ github.run_number }}"
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
+          generate_release_notes: true
+          files: dist/*
