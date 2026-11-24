@@ -33,7 +33,7 @@ ro.vendor.localhbm.enable=1                    # LHBM path
 persist.vendor.sys.fp.vendor=goodix            # <-- the critical one
 persist.vendor.fingerprint.sensor_type=optical
 vendor.fingerprint.aidl.support=1
-persist.vendor.sys.fp.fod.location.X_Y=540,2178
+persist.vendor.sys.fp.fod.location.X_Y=430,2068  # top-left of 220x220 icon
 persist.vendor.sys.fp.fod.size.width_height=220,220
 ```
 
@@ -48,11 +48,12 @@ those as session bookkeeping and they can outlive the actual touch. Instead:
 
 * HBM turns on only when `SESSION_ACTIVE` **and** a real finger is down on the
   FOD area (EV_KEY `0xC3` / `BTN_TOUCH` / MT coordinates inside the circle).
-* Finger-up forces `0` to the node with 3 retries (the vendor driver re-latches
-  `1` while finishing a capture).
+* Finger-up writes `0` **once**. No OPlus-style retry loop — the node has no
+  boolean read-back, so retries only spam logs.
 * `extCmd(4,0|4)`, `setModeValue(10,0)` and session end force it off.
 * A 500 ms idle guard clears a stale `1` when no finger is down and no fresh
   press came in within the hold window.
+* One press = one capture attempt. No hold-re-arm / duplicate auth.
 * Startup always clears HBM.
 
 Node: `/sys/kernel/tran_display/lcm_hbm_state`. Reading it returns a hex

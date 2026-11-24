@@ -79,12 +79,6 @@ fn write_hbm(on: bool, reason: &str) {
         // Some panels need a second write right after the boost starts.
         std::thread::sleep(Duration::from_millis(30));
         let _ = file.write_all(b"1\n");
-    } else {
-        // Vendor HAL can re-latch HBM while finishing a capture.
-        for _ in 0..3 {
-            std::thread::sleep(Duration::from_millis(10));
-            let _ = file.write_all(b"0\n");
-        }
     }
     HBM_ON.store(on, Ordering::SeqCst);
     tracing::info!("[HBM] {} ({}) node={}", if on { "ON" } else { "OFF" }, reason, hbm_read());

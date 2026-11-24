@@ -9,13 +9,7 @@ const OPLUS_DISPLAY_DIR: &str = "/data/addon/oplus_display";
 const OPLUS_DISPLAY_HBM: &str = "/data/addon/oplus_display/hbm";
 const OPLUS_DISPLAY_FPPRESS: &str = "/data/addon/oplus_display/notify_fppress";
 
-const HBM_SAFETY_TIMEOUT_MS: u64 = 10_000;
-/// How often the disable path re-writes the panel node when the read-back
-/// still reports HBM on (the vendor HAL can re-latch it while it finishes a
-/// capture, which used to leave the panel lit after the session ended).
-const OFF_RETRIES: u32 = 4;
-const OFF_RETRY_GAP_MS: u64 = 10;
-
+const HBM_SAFETY_TIMEOUT_MS: u64 = 3_000;
 struct HbmController {
     is_enabled: bool,
 }
@@ -28,13 +22,13 @@ static HBM_GENERATION: AtomicU64 = AtomicU64::new(0);
 fn read_tran() -> Option<i32> {
     let raw = fs::read_to_string(TRAN_LCM_HBM_STATE).ok()?;
     let t = raw.trim();
+    // This panel node reports a hex register value (e.g. "0xFA") that never
+    // changes with the boost. Treat anything other than literal 0/1 as
+    // unknown so the disable path does not retry or log a false "still on".
     match t {
         "0" => Some(0),
         "1" => Some(1),
-        _ => t.parse::<i32>().ok().or_else(|| {
-            let digits = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
-            i32::from_str_radix(digits, 16).ok()
-        }),
+        _ => None,
     }
 }
 
@@ -85,30 +79,6 @@ impl HbmController {
 
         // 2. ColorOS display addon command files (fallback)
         self.write_addon(enabled);
-
-        // 3. Disable is verified: a stale "on" here is the reported bug (panel stays
-        //    lit after enrolment/authentication already finished).
-        if !enabled {
-            for attempt in 1..=OFF_RETRIES {
-                match read_tran() {
-                    Some(0) | None => break,
-                    Some(v) => {
-                        log_warn!(
-                            "HBM still on (node={}) after disable, retry {}/{}",
-                            v, attempt, OFF_RETRIES
-                        );
-                        std::thread::sleep(Duration::from_millis(OFF_RETRY_GAP_MS));
-                        self.write_node(false);
-                        self.write_addon(false);
-                    }
-                }
-            }
-            if let Some(v) = read_tran() {
-                if v != 0 {
-                    log_warn!("HBM node still reports {} after {} retries", v, OFF_RETRIES);
-                }
-            }
-        }
 
         let changed = self.is_enabled != enabled;
         self.is_enabled = enabled;

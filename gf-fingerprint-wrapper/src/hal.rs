@@ -689,6 +689,13 @@ impl FingerprintHal {
     }
 
     pub fn notify_framework_touch(&self, is_down: bool) {
+        // MIUI SystemUI does not implement the ColorOS 1011 custom transact.
+        // Fail once, then skip it so SOFOD captures are not spammed.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static UNSUPPORTED: AtomicBool = AtomicBool::new(false);
+        if UNSUPPORTED.load(Ordering::SeqCst) {
+            return;
+        }
         log_info!("notify_framework_touch({}) invoked", is_down);
         let cb = {
             let cb_guard = self.current_callback.lock();
@@ -775,7 +782,8 @@ impl FingerprintHal {
                 );
             }
             Err(e) => {
-                log_warn!("notify_framework_touch: submit_transact(1001) failed: {:?}", e);
+                UNSUPPORTED.store(true, Ordering::SeqCst);
+                log_warn!("notify_framework_touch: custom transact unsupported by this framework, disabling: {:?}", e);
             }
         }
     }
@@ -1150,13 +1158,12 @@ impl FingerprintHal {
             crate::input::acquire_wakelock("oplus_udfps_fod_wake");
         }
 
-        // 3. Activate hardware HBM backlight and synchronize until panel confirms active (0xOK)
-        let hbm_ok = crate::hbm::set_hbm_sync(true, 500);
-        if !hbm_ok {
-            log_warn!("Hardware LCM HBM did not confirm 0xOK within 500ms, proceeding with capture fallback");
-        }
+        // 3. Activate HBM. The MTK node has no boolean read-back (it always
+        //    reports 0xFA), so waiting for a confirmation only burns ~500ms of
+        //    the touch window and makes short SOFOD presses abort.
+        crate::hbm::set_hbm(true);
 
-        // If finger was lifted during HBM synchronization, abort capture
+        // If finger was lifted while HBM came up, abort capture
         if !self.is_finger_down.load(Ordering::SeqCst) {
             log_info!("Finger lifted during optical sync delay, aborting capture");
             crate::hbm::set_hbm(false);
@@ -1221,30 +1228,9 @@ impl FingerprintHal {
         crate::input::release_wakelock("oplus_udfps_fod_wake");
     }
 
-    /// Jadwalkan capture ulang selama jari fisik masih menempel.
-    /// Dibatalkan otomatis oleh on_pointer_up()/cancel()/sukses auth (rearm_gen naik).
-    fn schedule_hold_rearm(&self, delay_ms: u64) {
-        if !self.finger_held.load(Ordering::SeqCst) || !self.is_active() {
-            return;
-        }
-        let gen = self.rearm_gen.fetch_add(1, Ordering::SeqCst) + 1;
-        let hal = match GLOBAL_HAL.get() {
-            Some(h) => h.clone(),
-            None => return,
-        };
-        let spawned = std::thread::Builder::new()
-            .name("fod_hold_rearm".to_string())
-            .spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                if hal.rearm_gen.load(Ordering::SeqCst) != gen {
-                    return;
-                }
-                hal.rearm_capture(gen);
-            });
-        if let Err(e) = spawned {
-            log_warn!("Hold-rearm: failed to spawn thread: {e}");
-        }
-    }
+    /// Disabled on MIUI: re-arming while the finger is still down caused
+    /// repeated capture / duplicate enrol-auth events. One press = one attempt.
+    fn schedule_hold_rearm(&self, _delay_ms: u64) {}
 
     /// Simulasi "angkat lalu tekan lagi" ke vendor HAL tanpa mengubah state UI framework
     /// (pressed icon tetap tampil, tidak ada notify touch up/down ke SystemUI).
@@ -1350,13 +1336,8 @@ impl FingerprintHal {
                 } else {
                     log_info!("Authentication FAILED (unrecognized finger, keeping session active for next touch)");
                     let _ = cb.onAuthenticationFailed();
-                    // Jari masih ditekan -> coba capture lagi tanpa perlu angkat jari (dibatasi)
-                    let n = self.auth_rearm_count.fetch_add(1, Ordering::SeqCst) + 1;
-                    if n <= HOLD_AUTH_REARM_MAX {
-                        self.schedule_hold_rearm(HOLD_AUTH_REARM_MS);
-                    } else {
-                        log_info!("Hold-rearm: auth retry cap ({}) reached, waiting for finger lift", HOLD_AUTH_REARM_MAX);
-                    }
+                    // No auto re-arm. A failed touch waits for the next real
+                    // finger press instead of re-triggering capture 3x.
                 }
             }
             FINGERPRINT_ACQUIRED => {
