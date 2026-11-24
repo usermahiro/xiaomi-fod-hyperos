@@ -157,3 +157,16 @@ cmd 1011 and HBM never lights while the screen is on / while scrolling.
 
 Verified: screen-off tap produces `Authentication SUCCEEDED`; screen-on tap
 produces no HBM activity.
+
+## FOD press animation (no SystemUI smali edits)
+MIUI only starts the pressed-icon animation when the HAL reports a vendor
+acquired event. The wrapper emits, from the bridge itself:
+
+- `onAcquired(AcquiredInfo::VENDOR, 22)` on finger down
+- `onAcquired(AcquiredInfo::VENDOR, 23)` on finger up
+
+`FingerprintServiceStubImpl` maps these to `onAcquired(100,0)` / `(101,0)`,
+which KeyguardUpdateMonitor forwards to `onFpsPointerDown()` /
+`onFpsPointerUp()` -> `MiuiGxzwViewIcon.onTouchDown()` / `onTouchUp()`.
+Sending only `AcquiredInfo::START` never triggered the animation.
+No framework/SystemUI smali patching is required.

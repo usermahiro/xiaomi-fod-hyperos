@@ -1163,9 +1163,13 @@ impl FingerprintHal {
             x, y, screen_state
         );
 
-        // 1. Notify framework touch start (standard AIDL AcquiredInfo::START)
+        // 1. Notify framework. MIUI's FingerprintServiceStubImpl translates
+        //    AIDL VENDOR(7) -> framework 6; vendorCode 22 -> onAcquired(100,0)
+        //    -> KeyguardUpdateMonitor.onFpsPointerDown() -> FOD press animation.
+        //    START alone only reports latency and never triggers the animation.
         if let Some(cb) = self.current_callback.lock().as_ref() {
             let _ = cb.onAcquired(AcquiredInfo::START, 0);
+            let _ = cb.onAcquired(AcquiredInfo::VENDOR, 22);
         }
 
         // 2. Notify ColorOS framework of touch down via binder transact 1001 (cmd 1201)
@@ -1224,6 +1228,14 @@ impl FingerprintHal {
         self.rearm_gen.fetch_add(1, Ordering::SeqCst);
         self.step_captured.store(false, Ordering::SeqCst);
         log_info!("on_pointer_up (was_down={}, is_active={}) -> deactivating HBM", was_down, self.is_active());
+
+        // MIUI finger-up code (framework 6 / vendorCode 23) -> onAcquired(101,0)
+        // -> onFpsPointerUp(), stops the FOD press animation.
+        if was_down {
+            if let Some(cb) = self.current_callback.lock().as_ref() {
+                let _ = cb.onAcquired(AcquiredInfo::VENDOR, 23);
+            }
+        }
 
         // Always guarantee HBM is turned off immediately on pointer up
         crate::hbm::set_hbm(false);
