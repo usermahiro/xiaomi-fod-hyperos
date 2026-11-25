@@ -191,7 +191,6 @@ impl ISession for SessionService {
                 for &id in &ids {
                     hal.remove(id as u32);
                 }
-                // Allow up to 150ms for asynchronous notification from vendor HAL
                 std::thread::sleep(std::time::Duration::from_millis(150));
                 if hal.check_and_clear_remove_pending() {
                     log_info!("Vendor HAL did not dispatch remove notification; sending fallback onEnrollmentsRemoved({:?})", ids);
@@ -366,7 +365,7 @@ impl IFingerprint for FingerprintService {
         let props = vec![SensorProps {
             r#commonProps: CommonProps {
                 r#sensorId: 0,
-                r#sensorStrength: 2, // SensorStrength::STRONG (15)
+                r#sensorStrength: 2,
                 r#maxEnrollmentsPerUser: 5,
                 r#componentInfo: vec![],
             },

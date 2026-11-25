@@ -10,9 +10,9 @@ pub const EV_SYN: u16 = 0x00;
 pub const EV_KEY: u16 = 0x01;
 pub const EV_ABS: u16 = 0x03;
 pub const FOD_KEYCODE: u16 = 195;     // 0x00c3 on FocalTech
-pub const KEY_GESTURE_38: u16 = 38;    // 0x0026 on FocalTech FT3683G
-pub const KEY_F20: u16 = 190;         // 0x00be on adaptive-ts when gesture is 0xbe (FOD)
-pub const KEY_F13: u16 = 183;         // 0x00b7 on adaptive-ts when gesture is 0xcc (Gesture Click)
+pub const KEY_GESTURE_38: u16 = 38;
+pub const KEY_F20: u16 = 190;
+pub const KEY_F13: u16 = 183;
 pub const BTN_TOUCH: u16 = 330;
 pub const ABS_MT_SLOT: u16 = 47;
 pub const ABS_MT_TOUCH_MAJOR: u16 = 48;
@@ -28,7 +28,7 @@ pub const SOFOD_HOLD_MS: u64 = 350;
 
 pub const FOD_CENTER_X: i32 = 540;
 pub const FOD_CENTER_Y: i32 = 2172;
-pub const FOD_TOUCH_RADIUS: i32 = 140; // 114px sensor radius + 26px thumb margin
+pub const FOD_TOUCH_RADIUS: i32 = 140;
 pub const FOD_TOUCH_RADIUS_SQ: i32 = FOD_TOUCH_RADIUS * FOD_TOUCH_RADIUS; // 19600
 
 #[inline]
@@ -232,7 +232,6 @@ pub fn find_power_key_device() -> Option<(File, String)> {
         let name = get_device_name(fd);
         let key_bits = get_key_bits(fd);
 
-        // Prefer mtk-pmic-keys or device declaring KEY_POWER (116)
         if name.contains("pmic-keys") || (test_bit(116, &key_bits) && !name.contains("tpd")) {
             let path_str = path.to_string_lossy().into_owned();
             log_info!("Found power key device: {} ({})", path_str, name);
@@ -348,7 +347,6 @@ pub fn wake_display_pipeline() {
 }
 
 pub const SOFOD_LOGO_HOLD_MS: u64 = 5000;
-static LOGO_HOLD_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub fn try_screen_off_wake_only(
     _hal: &Arc<crate::hal::FingerprintHal>,
@@ -513,7 +511,6 @@ pub fn refire_sofod_touch(px: i32, py: i32, default_path: &str) {
 
             let cfg = load_sofod_config();
 
-            // panel units: 16 per pixel (X max 17279, Y max 38399)
             let panel_x = (px * 16).min(17279);
             let panel_y = (py * 16).min(38399);
 
@@ -682,8 +679,6 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                                                             }
                                                             if !crate::hal::FingerprintHal::is_display_dpms_on() {
                                                                 wake_display_pipeline();
-                                                                // Wait for the DRM pipeline to actually come up before
-                                                                // writing HBM; 60ms was too short on deep sleep.
                                                                 for _ in 0..40 {
                                                                     if crate::hal::FingerprintHal::is_display_dpms_on() { break; }
                                                                     std::thread::sleep(std::time::Duration::from_millis(25));
@@ -697,8 +692,6 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                                                             is_down = true;
                                                             last_down_time = std::time::Instant::now();
                                                             hal.on_pointer_down(tx, ty, 0.0, 0.0);
-                                                            // Goodix captures only on KEY 0xC3 DOWN. The kernel FOD key in deep
-                                                            // sleep fires before a session exists -> re-trigger now that HBM is on.
                                                             refire_sofod_touch(tx, ty, &path);
                                                         } else {
                                                             log_info!(
@@ -712,7 +705,6 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                                                     }
                                                 }
                                             }
-                                            // ABS_MT_TRACKING_ID == -1 and BTN_TOUCH == 0.
                                         } else if event.code == KEY_F20 || event.code == KEY_F13 {
                                             if event.value == 1 {
                                                 let target = if cur_x >= 0 && cur_y >= 0 {

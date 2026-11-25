@@ -10,9 +10,9 @@ SYM_ENABLE = "_ZN6goodix6Device6enableEv"
 UI_READY_OFF = 0x1B4
 NOP = 0xD503201F
 
-# build yang sudah diuji manual
+# known builds
 KNOWN_BUILDS = {
-    "789c228681e5f5c66bcf84bde58591f6e45ec2c4afbea8944dcd48b6eecf74af": "libgf_hal.so (Transsion KJ7 build yang dianalisis)",
+    "789c228681e5f5c66bcf84bde58591f6e45ec2c4afbea8944dcd48b6eecf74af": "libgf_hal.so (Transsion KJ7 tested build)",
 }
 
 
@@ -51,7 +51,7 @@ class Elf:
         for s in self.secs:
             if s["sname"] == name:
                 return s
-        raise PatchError(f"section {name} tidak ada")
+        raise PatchError(f"section {name} missing")
 
     def _dynsyms(self):
         ds = self.sec(".dynsym")
@@ -68,7 +68,7 @@ class Elf:
         for p_va, p_off, p_fsz in self.loads:
             if p_va <= va < p_va + p_fsz:
                 return va - p_va + p_off
-        raise PatchError(f"vma 0x{va:x} tidak dipetakan")
+        raise PatchError(f"vma 0x{va:x} not mapped")
 
     def u32(self, va):
         return struct.unpack_from("<I", self.d, self.va2off(va))[0]
@@ -78,11 +78,11 @@ class Elf:
 
     def symbol(self, name):
         if name not in self.syms:
-            raise PatchError(f"simbol {name} tidak ditemukan")
+            raise PatchError(f"symbol {name} not found")
         return self.syms[name]
 
     def plt_stub(self, func):
-        """alamat stub PLT untuk fungsi impor `func` (lewat .rela.plt + decode adrp/ldr)."""
+        """PLT stub for imported func."""
         ds = self.sec(".dynsym")
         strtab = self.secs[ds["link"]]
         rp = self.sec(".rela.plt")
@@ -95,7 +95,7 @@ class Elf:
                 got = r_off
                 break
         if got is None:
-            raise PatchError(f"relokasi PLT untuk {func} tidak ada")
+            raise PatchError(f"PLT relocation for {func} missing")
         plt = self.sec(".plt")
         for va in range(plt["addr"], plt["addr"] + plt["size"] - 8, 4):
             w0, w1 = self.u32(va), self.u32(va + 4)
@@ -107,7 +107,7 @@ class Elf:
                 page = (va & ~0xFFF) + (imm << 12)
                 if page + ((w1 >> 10) & 0xFFF) * 8 == got:
                     return va
-        raise PatchError(f"stub PLT {func} tidak ditemukan")
+        raise PatchError(f"PLT stub {func} not found")
 
 
 def enc_bl(src, dst):
@@ -127,7 +127,7 @@ def is_bl_to(w, pc, target):
 def plan_uevent(elf, delay_us):
     va, size = elf.symbol(SYM_UEVENT)
     if size < 24:
-        raise PatchError("tran_uevent_handle terlalu pendek (<24 byte)")
+        raise PatchError("tran_uevent_handle too short (<24 bytes)")
     usleep = elf.plt_stub("usleep")
     new = [0xA9BF7BFD, enc_movw(0, delay_us), enc_bl(va + 8, usleep),
            enc_movw(0, 1), 0xA8C17BFD, 0xD65F03C0]
@@ -135,7 +135,7 @@ def plan_uevent(elf, delay_us):
     already = cur[0] == new[0] and (cur[1] & 0xFFE0001F) == 0x52800000 \
         and is_bl_to(cur[2], va + 8, usleep) and cur[3:] == new[3:]
     if not already and (cur[0] & 0xFFC07FFF) != 0xA9807BFD:
-        raise PatchError(f"prolog tran_uevent_handle tak dikenal: {cur[0]:08x}")
+        raise PatchError(f"unknown tran_uevent_handle prologue: {cur[0]:08x}")
     desc = f"tran_uevent_handle @0x{va:x}: usleep({delay_us}) + return 1 (usleep@plt=0x{usleep:x})"
     return desc, [(va + 4 * i, w) for i, w in enumerate(new) if cur[i] != w]
 
@@ -153,11 +153,11 @@ def plan_uiready(elf):
         pc = hits[0]
         return f"gate uiReadyStatus @0x{pc:x}: ldr/cmp/b.ne -> 3x NOP", [(pc, NOP), (pc + 4, NOP), (pc + 8, NOP)]
     if len(hits) > 1:
-        raise PatchError("pola gate uiReady ambigu (>1 kecocokan)")
+        raise PatchError("ambiguous uiReady gate (>1 match)")
     for pc in range(va, va + size - 8, 4):
         if elf.u32(pc) == elf.u32(pc + 4) == elf.u32(pc + 8) == NOP:
-            return f"gate uiReadyStatus @0x{pc:x}: sudah ter-patch", []
-    raise PatchError("gate uiReadyStatus tidak ditemukan di gfHbmEventDetectingThread")
+            return f"gate uiReadyStatus @0x{pc:x}: already patched", []
+    raise PatchError("uiReadyStatus gate not found in gfHbmEventDetectingThread")
 
 
 def plan_init(elf):
@@ -174,12 +174,12 @@ def plan_init(elf):
             tgt = pc + 4 + imm * 4
             warn = ""
             if not any((elf.u32(p) & 0xFFFFFFE1) == 0x72B00021 for p in range(pc - 24, pc, 4)):
-                warn = " (PERINGATAN: konstanta ioctl 0x8001xxxx tidak terlihat)"
+                warn = " (warning: ioctl constant 0x8001xxxx not seen)"
             new = 0x14000000 | (((tgt - (pc + 4)) >> 2) & 0x3FFFFFF)
             return f"Device::enable ioctl init @0x{pc + 4:x}: cbz w0 -> b 0x{tgt:x}{warn}", [(pc + 4, new)]
         if (nxt & 0xFC000000) == 0x14000000:
-            return f"Device::enable ioctl init @0x{pc + 4:x}: sudah ter-patch", []
-    raise PatchError("bl ioctl + cbz w0 tidak ditemukan di Device::enable")
+            return f"Device::enable ioctl init @0x{pc + 4:x}: already patched", []
+    raise PatchError("bl ioctl + cbz w0 not found in Device::enable")
 
 
 def main():
@@ -187,30 +187,30 @@ def main():
     ap.add_argument("lib")
     ap.add_argument("-o", "--output", help="default: <lib>.patched")
     ap.add_argument("--delay-us", type=int, default=30000,
-                    help="jeda pengganti uevent (mikrodetik, 1..65535). default 30000 = perilaku skrip lama. "
-                         "Lebih kecil = deteksi FOD lebih cepat tetapi loop lebih sering berputar.")
-    ap.add_argument("--check", action="store_true", help="dry-run: hanya verifikasi dan tampilkan rencana")
-    ap.add_argument("--strict", action="store_true", help="tolak build yang hash-nya belum dikenal")
+                    help="uevent delay in microseconds (1..65535). default 30000. "
+                         "Lower = faster FOD detection, more polling.")
+    ap.add_argument("--check", action="store_true", help="dry run: verify and print plan")
+    ap.add_argument("--strict", action="store_true", help="reject builds with unknown hash")
     a = ap.parse_args()
 
     if not 1 <= a.delay_us <= 0xFFFF:
-        sys.exit("--delay-us harus 1..65535")
+        sys.exit("--delay-us must be 1..65535")
     raw = open(a.lib, "rb").read()
     sha = hashlib.sha256(raw).hexdigest()
     if sha in KNOWN_BUILDS:
-        print(f"[ok] build dikenal: {KNOWN_BUILDS[sha]}")
+        print(f"[ok] known build: {KNOWN_BUILDS[sha]}")
     else:
-        msg = f"build belum dikenal (sha256 {sha})"
+        msg = f"unknown build (sha256 {sha})"
         if a.strict:
-            sys.exit("[tolak] " + msg)
-        print("[peringatan] " + msg + "; lanjut karena pola instruksi diverifikasi satu per satu")
+            sys.exit("[reject] " + msg)
+        print("[warning] " + msg + "; continuing with verified instruction patterns")
 
     data = bytearray(raw)
     try:
         elf = Elf(data)
         plans = [plan_uevent(elf, a.delay_us), plan_uiready(elf), plan_init(elf)]
     except (PatchError, struct.error, ValueError, IndexError) as e:
-        sys.exit(f"[gagal] {e}\nTidak ada file yang ditulis.")
+        sys.exit(f"[error] {e}\nNo file written.")
 
     changed = 0
     for desc, writes in plans:
@@ -219,12 +219,12 @@ def main():
             elf.put32(va, val)
             changed += 1
     if a.check:
-        print(f"[check] {changed} instruksi akan diubah; tidak menulis file.")
+        print(f"[check] {changed} instructions to change; no file written.")
         return
     out = a.output or a.lib + ".patched"
     open(out, "wb").write(data)
-    print(f"[selesai] {changed} instruksi diubah -> {out}")
-    print(f"          sha256 hasil: {hashlib.sha256(bytes(data)).hexdigest()}")
+    print(f"[done] {changed} instructions changed -> {out}")
+    print(f"          sha256 result: {hashlib.sha256(bytes(data)).hexdigest()}")
 
 
 if __name__ == "__main__":

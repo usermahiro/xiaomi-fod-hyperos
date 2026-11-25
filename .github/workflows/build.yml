@@ -13,7 +13,7 @@ on:
         type: boolean
         default: false
       delay_us:
-        description: "Jeda pengganti uevent libgf_hal (mikrodetik)"
+        description: "uevent delay for libgf_hal (microseconds)"
         type: string
         default: "30000"
 
@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set version
         id: ver
@@ -78,17 +78,17 @@ jobs:
           TOP=$(unzip -Z1 "dist/transsion-vendor-fod-package-v${VERSION}.zip" | cut -d/ -f1 | sort -u | tr '\n' ' ')
           echo "Top-level: $TOP"
           [ "$TOP" = "vendor " ] || [ "$TOP" = "odm vendor " ] \
-            || { echo "::error::Layout paket salah: $TOP"; exit 1; }
+            || { echo "::error::Bad package layout: $TOP"; exit 1; }
           for f in vendor/bin/hw/android.hardware.biometrics.fingerprint-service.transsion \
                    vendor/etc/init/android.hardware.biometrics.fingerprint-service.transsion.rc \
                    vendor/etc/vintf/manifest/manifest_fingerprint_transsion.xml; do
             unzip -Z1 "dist/transsion-vendor-fod-package-v${VERSION}.zip" | grep -qx "$f" \
-              || { echo "::error::File wajib tidak ada: $f"; exit 1; }
+              || { echo "::error::Required file missing: $f"; exit 1; }
           done
           (cd dist && sha256sum * > "SHA256SUMS-v${VERSION}.txt")
           ls -lh dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: fod-wrapper-v${{ steps.ver.outputs.version }}
           path: gf-fingerprint-wrapper/dist/*
@@ -99,7 +99,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -123,7 +123,7 @@ jobs:
         working-directory: xiaomi-fod-hal
         run: bash build.sh release
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: xiaomi_fod_hal
           path: xiaomi-fod-hal/target/aarch64-linux-android/release/xiaomi_fod_hal
@@ -134,7 +134,7 @@ jobs:
     needs: [wrapper, shim]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -146,7 +146,7 @@ jobs:
           ls -lh dist
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ env.VERSION_MAJOR_MINOR }}.${{ github.run_number }}
           name: "FOD bridge + MIUI shim v${{ env.VERSION_MAJOR_MINOR }}.${{ github.run_number }}"

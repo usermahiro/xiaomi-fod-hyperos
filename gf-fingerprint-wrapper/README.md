@@ -232,7 +232,7 @@ All artifacts install strictly into `/vendor`:
 
 ### Goodix package layout (built by `build.sh` / GitHub Actions)
 
-Stock Goodix libraries live in `odm_pkg/` and are installed as:
+Stock Goodix libraries live in `prebuilt/` and are installed as:
 
 ```text
 odm/lib64/libgf_hal.so                  # patched by patch_libgf_hal.py at build time
@@ -243,6 +243,7 @@ vendor/bin/hw/android.hardware.biometrics.fingerprint-service.transsion   # Rust
 Pipeline: `cargo build` (aarch64-linux-android) -> patch `libgf_hal.so` -> verify patch (`--check` must report 0 pending) -> pack `odm/` + `vendor/`.
 `FOD_DELAY_US` (default `30000`) sets the delay that replaces the kernel uevent wait; lower values react faster but poll more often. In GitHub Actions it is the `delay_us` input of *Run workflow*.
 `libTranMegFusion.so` is not shipped; keep the one already present in `/odm/lib64/`.
+Logs are off in release. Set `persist.sys.xiaomifingerlog.mahiro=true` and restart the service to enable them.
 
 ## 5. Source Code Structure
 

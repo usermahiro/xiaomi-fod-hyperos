@@ -35,7 +35,6 @@ fn main() -> anyhow::Result<()> {
     oplus_udfps_bridge_transsion::props::enforce();
     oplus_udfps_bridge_transsion::props::spawn_guard();
 
-    // Ensure gesture FOD is enabled in kernel driver
     oplus_udfps_bridge_transsion::input::ensure_gesture_fod_enabled();
 
     let brand = get_system_prop(b"ro.product.brand\0", "Transsion");
@@ -47,13 +46,11 @@ fn main() -> anyhow::Result<()> {
         brand, model, platform
     );
 
-    // Initialize Binder process state FIRST
     rsbinder::ProcessState::init_default().map_err(|error| {
         anyhow::anyhow!("failed to initialize Binder process state: {error}")
     })?;
     rsbinder::ProcessState::start_thread_pool();
 
-    // Register AIDL fingerprint service IMMEDIATELY so ServiceManager & system_server never wait/deadlock
     let service = FingerprintService::new();
     let binder = BnFingerprint::new_binder(service);
     rsbinder::hub::add_service(SERVICE_NAME, binder.as_binder())?;
@@ -63,7 +60,6 @@ fn main() -> anyhow::Result<()> {
         SERVICE_NAME
     );
 
-    // Asynchronously initialize FingerprintHal, touch listeners and HBM controller in background
     std::thread::spawn(|| {
         log_info!("Initializing FingerprintHal and background listeners...");
         match oplus_udfps_bridge_transsion::hal::FingerprintHal::get_instance() {

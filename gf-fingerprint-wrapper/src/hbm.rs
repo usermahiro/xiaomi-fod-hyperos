@@ -17,8 +17,6 @@ struct HbmController {
 static GLOBAL_HBM: Mutex<Option<HbmController>> = Mutex::new(None);
 static HBM_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Reads the panel HBM node. `None` when the node is missing or not numeric
-/// (device without the node, or an unusual panel driver).
 fn read_tran() -> Option<i32> {
     let raw = fs::read_to_string(TRAN_LCM_HBM_STATE).ok()?;
     let t = raw.trim();
@@ -41,7 +39,6 @@ impl HbmController {
             return;
         }
         if enabled {
-            // Some panels need a second write after the first one starts the boost.
             std::thread::sleep(Duration::from_millis(30));
             let _ = fs::write(TRAN_LCM_HBM_STATE, val);
         }
@@ -60,21 +57,16 @@ impl HbmController {
     }
 
     fn write(&mut self, enabled: bool) {
-        // Bump the generation before touching hardware: a pending watchdog from an
-        // older enable must not fire on top of this write.
         let generation = HBM_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
         if enabled {
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(HBM_SAFETY_TIMEOUT_MS));
-                // Re-check under the lock so a concurrent enable/disable wins.
                 force_off_if_generation(generation);
             });
         }
 
-        // 1. Direct hardware write to MTK/Transsion panel HBM node
         self.write_node(enabled);
 
-        // 2. ColorOS display addon command files (fallback)
         self.write_addon(enabled);
 
         let changed = self.is_enabled != enabled;
@@ -89,8 +81,6 @@ impl HbmController {
     }
 }
 
-/// Turns HBM off only when the generation is still the one that armed the
-/// watchdog, so a newer press/disable is never overridden.
 fn force_off_if_generation(expected: u64) {
     let mut lock = GLOBAL_HBM.lock();
     if HBM_GENERATION.load(Ordering::SeqCst) != expected {
@@ -106,7 +96,6 @@ fn force_off_if_generation(expected: u64) {
     }
 }
 
-/// True while this bridge believes the panel backlight boost is on.
 pub fn is_enabled() -> bool {
     GLOBAL_HBM.lock().as_ref().map_or(false, |c| c.is_enabled)
 }
@@ -115,9 +104,6 @@ pub fn set_hbm(enabled: bool) -> bool {
     set_hbm_sync(enabled, 0)
 }
 
-/// Enables/disables HBM. For `enabled == true` with `max_wait_ms > 0` this waits
-/// until the panel node confirms the boost, returning `false` on timeout. A
-/// missing node counts as confirmed (nothing to poll on such a panel).
 pub fn set_hbm_sync(enabled: bool, max_wait_ms: u64) -> bool {
     {
         let mut lock = GLOBAL_HBM.lock();
@@ -138,7 +124,6 @@ pub fn set_hbm_sync(enabled: bool, max_wait_ms: u64) -> bool {
     loop {
         match read_tran() {
             Some(1) => return true,
-            // No readable node: nothing to confirm against.
             None => return true,
             _ => {}
         }

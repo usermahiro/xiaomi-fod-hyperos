@@ -13,14 +13,10 @@ use crate::android::hardware::keymaster::HardwareAuthToken::HardwareAuthToken;
 use crate::android::hardware::keymaster::Timestamp::Timestamp;
 use crate::{log_debug, log_info, log_warn};
 
-const HOLD_AUTH_REARM_MS: u64 = 350;
-const HOLD_AUTH_REARM_MAX: u32 = 3;
 const AUTO_SESSION_GRACE_MS: u128 = 2000;
-const HOLD_FAKE_UP_MS: u64 = 80;
 
 pub const HARDWARE_MODULE_TAG: u32 = 0x48574D54; // 'HWMT'
 
-// Legacy Fingerprint Message Types (hardware/fingerprint.h)
 pub const FINGERPRINT_ERROR: i32 = -1;
 pub const FINGERPRINT_ACQUIRED: i32 = 1;
 pub const FINGERPRINT_TEMPLATE_ENROLLING: i32 = 3;
@@ -28,7 +24,6 @@ pub const FINGERPRINT_TEMPLATE_REMOVED: i32 = 4;
 pub const FINGERPRINT_AUTHENTICATED: i32 = 5;
 pub const FINGERPRINT_TEMPLATE_ENUMERATING: i32 = 6;
 
-// Legacy Fingerprint Error Codes
 pub const FINGERPRINT_ERROR_HW_UNAVAILABLE: i32 = 1;
 pub const FINGERPRINT_ERROR_UNABLE_TO_PROCESS: i32 = 2;
 pub const FINGERPRINT_ERROR_TIMEOUT: i32 = 3;
@@ -37,7 +32,6 @@ pub const FINGERPRINT_ERROR_CANCELED: i32 = 5;
 pub const FINGERPRINT_ERROR_UNABLE_TO_REMOVE: i32 = 6;
 pub const FINGERPRINT_ERROR_LOCKOUT: i32 = 7;
 
-// Legacy Fingerprint Acquired Info Codes
 pub const FINGERPRINT_ACQUIRED_GOOD: i32 = 0;
 pub const FINGERPRINT_ACQUIRED_PARTIAL: i32 = 1;
 pub const FINGERPRINT_ACQUIRED_INSUFFICIENT: i32 = 2;
@@ -255,7 +249,6 @@ pub struct FingerprintHal {
     is_goodix: bool,
     current_callback: Arc<Mutex<Option<Strong<dyn ISessionCallback>>>>,
     is_active: AtomicBool,
-    /// true when the current session was started by this HAL itself
     auto_session: AtomicBool,
     auto_session_at: Mutex<Option<std::time::Instant>>,
     is_finger_down: AtomicBool,
@@ -416,7 +409,6 @@ impl FingerprintHal {
             fp_ref.common.version
         );
 
-        // 1. Check for Silead custom command: silfp_finger_cust_cmd(cmd, arg)
         let silead_sym = CString::new("silfp_finger_cust_cmd").unwrap();
         let mut fn_silead_cmd: Option<FnSileadCustCmd> = unsafe {
             let sym = libc::dlsym(handle, silead_sym.as_ptr());
@@ -428,7 +420,6 @@ impl FingerprintHal {
             }
         };
 
-        // 2. Check for Goodix custom command: fingerprint_command(dev, cmd, arg)
         let goodix_sym = CString::new("_Z19fingerprint_commandP18fingerprint_devicejj").unwrap();
         let mut fn_goodix_cmd: Option<FnGoodixCustCmd> = unsafe {
             let sym = libc::dlsym(handle, goodix_sym.as_ptr());
@@ -448,7 +439,6 @@ impl FingerprintHal {
             }
         }
 
-        // 3. Resolve Silead optical worker symbols from handle or libsl_fp_impl.so
         let sl_impl_path = CString::new("/vendor/lib64/libsl_fp_impl.so").unwrap();
         let sl_impl_handle = unsafe { libc::dlopen(sl_impl_path.as_ptr(), libc::RTLD_NOW) };
         if !sl_impl_handle.is_null() {
@@ -597,7 +587,6 @@ impl FingerprintHal {
             screen_state: AtomicI32::new(1),
         });
 
-        // Set up callback notification
         let set_notify = if is_goodix {
             unsafe { (*(dev_ptr as *const goodix_fingerprint_device_t)).set_notify }
         } else {
@@ -795,13 +784,12 @@ impl FingerprintHal {
         self.auto_session.store(false, Ordering::SeqCst);
         self.step_captured.store(false, Ordering::SeqCst);
         self.saved_enroll_fid.store(0, Ordering::SeqCst);
-        // A new operation must never inherit a lit panel from the previous one.
         crate::hbm::set_hbm(false);
         self.is_finger_down.store(false, Ordering::SeqCst);
         log_info!("FingerprintHal::enroll invoked");
 
         if let Some(msg_send) = self.fn_silfp_msg_send {
-            unsafe { msg_send(3) }; // Ensure clean finger-up state in Silead message queue
+            unsafe { msg_send(3) };
         }
 
         if self.is_goodix {
@@ -828,7 +816,6 @@ impl FingerprintHal {
         }
     }
 
-    /// SOFOD: the screen is off/doze and nobody started a session.
     pub fn start_auto_authenticate(&self) -> i32 {
         let ret = self.authenticate(0);
         *self.auto_session_at.lock() = Some(std::time::Instant::now());
@@ -901,18 +888,15 @@ impl FingerprintHal {
 
         match state {
             0 => {
-                // State 0: fully sleep (Off)
                 log_info!("[SleepState: OFF] Screen reached fully sleep (Off). Arming low-power gesture mode.");
                 crate::input::ensure_gesture_fod_enabled();
             }
             2 => {
-                // State 2: Dozing / Doze (AOD)
                 log_info!("[SleepState: DOZE] Screen reached Dozing/Doze (AOD). Maintaining touch & optical readiness.");
                 crate::input::ensure_gesture_fod_enabled();
                 self.send_custom_cmd(10, 1, 0x10001, 1);
             }
             1 => {
-                // State 1: Awake (Screen ON)
                 log_info!("[SleepState: AWAKE] Screen is ON / active.");
                 self.end_auto_session("screen turned ON", AUTO_SESSION_GRACE_MS);
                 self.send_custom_cmd(10, 1, 0x10001, 1);
@@ -1061,7 +1045,6 @@ impl FingerprintHal {
         }
     }
 
-    // Touch & Optical Illumination Callbacks
     pub fn on_pointer_down(&self, x: i32, y: i32, _minor: f32, _major: f32) {
         if (x != 0 || y != 0) && !crate::input::is_inside_fod_area(x, y) {
             log_info!(
@@ -1113,7 +1096,6 @@ impl FingerprintHal {
 
         crate::hbm::set_hbm(true);
 
-        // If finger was lifted while HBM came up, abort capture
         if !self.is_finger_down.load(Ordering::SeqCst) {
             log_info!("Finger lifted during optical sync delay, aborting capture");
             crate::hbm::set_hbm(false);
@@ -1125,7 +1107,6 @@ impl FingerprintHal {
 
         std::thread::sleep(std::time::Duration::from_millis(5));
 
-        // Re-check if finger was lifted during settling delay
         if !self.is_finger_down.load(Ordering::SeqCst) {
             log_info!("Finger lifted during settling delay, aborting capture");
             crate::hbm::set_hbm(false);
@@ -1135,7 +1116,6 @@ impl FingerprintHal {
             return;
         }
 
-        // 5. Wake vendor sensor and start optical capture
         self.send_custom_cmd(10, 1, 0x10001, 1);
         self.send_custom_cmd(11, 1, 0x10001, 1);
 
@@ -1156,17 +1136,14 @@ impl FingerprintHal {
         log_info!("on_pointer_up (was_down={}, is_active={}) -> deactivating HBM", was_down, self.is_active());
 
         // MIUI finger-up
-        // -> onFpsPointerUp(), stops the FOD press animation.
         if was_down {
             if let Some(cb) = self.current_callback.lock().as_ref() {
                 let _ = cb.onAcquired(AcquiredInfo::VENDOR, 23);
             }
         }
 
-        // Always guarantee HBM is turned off immediately on pointer up
         crate::hbm::set_hbm(false);
 
-        // Inform vendor sensor of finger lift
         self.send_custom_cmd(11, 0, 0x10001, 0);
 
         if let Some(sync_optic) = self.fn_silfp_sync_optic {
@@ -1183,55 +1160,6 @@ impl FingerprintHal {
         crate::input::release_wakelock("oplus_udfps_fod_wake");
     }
 
-    /// Disabled on MIUI: re-arming while the finger is still down caused
-    /// repeated capture / duplicate enrol-auth events. One press = one attempt.
-    fn schedule_hold_rearm(&self, _delay_ms: u64) {}
-
-    /// Simulasi "angkat lalu tekan lagi" ke vendor HAL tanpa mengubah state UI framework
-    /// (pressed icon tetap tampil, tidak ada notify touch up/down ke SystemUI).
-    fn rearm_capture(&self, gen: u32) {
-        let still = |s: &Self| {
-            s.finger_held.load(Ordering::SeqCst)
-                && s.is_active()
-                && s.rearm_gen.load(Ordering::SeqCst) == gen
-        };
-        if !still(self) {
-            return;
-        }
-        log_info!("Hold-rearm: finger still held -> re-triggering capture (KEY 0xC3 up/down)");
-
-        // fake lift: KEY 0xC3 UP ke touchscreen (ini yang dibaca Goodix HAL sebagai FINGER_UP)
-        crate::input::inject_fod_key(0);
-        crate::hbm::set_hbm(false);
-        self.send_custom_cmd(11, 0, 0x10001, 0);
-        if let Some(sync_optic) = self.fn_silfp_sync_optic {
-            unsafe { sync_optic(0) };
-        } else if let Some(msg_send) = self.fn_silfp_msg_send {
-            unsafe { msg_send(3) };
-        }
-        std::thread::sleep(std::time::Duration::from_millis(HOLD_FAKE_UP_MS));
-        if !still(self) {
-            return;
-        }
-
-        // fake press: HBM on + arm
-        self.is_finger_down.store(true, Ordering::SeqCst);
-        self.step_captured.store(false, Ordering::SeqCst);
-        if !crate::hbm::set_hbm_sync(true, 500) {
-            log_warn!("Hold-rearm: HBM did not confirm within 500ms, continuing");
-        }
-        if !still(self) {
-            crate::hbm::set_hbm(false);
-            self.is_finger_down.store(false, Ordering::SeqCst);
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        self.send_custom_cmd(10, 1, 0x10001, 1);
-        self.send_custom_cmd(11, 1, 0x10001, 1);
-        // fake press: KEY 0xC3 DOWN -> Goodix HAL mulai capture
-        crate::input::inject_fod_key(1);
-    }
-
     pub fn is_finger_held(&self) -> bool {
         self.finger_held.load(Ordering::SeqCst)
     }
@@ -1241,7 +1169,6 @@ impl FingerprintHal {
         self.send_custom_cmd(10, 1, 0x10001, 1);
     }
 
-    // Internal notification dispatcher from C trampoline
     fn on_notify(&self, msg: &fingerprint_msg_t) {
         let cb_opt = self.current_callback.lock().clone();
         let cb = match cb_opt {
@@ -1332,7 +1259,6 @@ impl FingerprintHal {
                     self.saved_enroll_fid.store(raw_fid, Ordering::SeqCst);
                 }
 
-                // Disarm capture for this touch so Silead does not burst multiple captures
                 self.send_custom_cmd(11, 0, 0x10001, 0);
                 if let Some(sync_optic) = self.fn_silfp_sync_optic {
                     unsafe { sync_optic(0) };
@@ -1340,7 +1266,6 @@ impl FingerprintHal {
                     unsafe { msg_send(3) };
                 }
 
-                // Turn off HBM after sample capture to prompt user to lift and press again
                 crate::hbm::set_hbm(false);
                 self.is_finger_down.store(false, Ordering::SeqCst);
 
@@ -1359,7 +1284,6 @@ impl FingerprintHal {
 
                 log_info!("Reporting enrollment progress: fid {}, remaining {}", fid, raw_remaining);
                 let _ = cb.onEnrollmentProgress(fid, raw_remaining);
-                // Cancel any pending rearm; next sample requires a fresh touch.
                 self.rearm_gen.fetch_add(1, Ordering::SeqCst);
 
                 if raw_remaining == 0 {
@@ -1424,7 +1348,7 @@ impl FingerprintHal {
                     FINGERPRINT_ERROR_NO_SPACE => (Error::NO_SPACE, 0),
                     FINGERPRINT_ERROR_CANCELED => (Error::CANCELED, 0),
                     FINGERPRINT_ERROR_UNABLE_TO_REMOVE => (Error::UNABLE_TO_REMOVE, 0),
-                    FINGERPRINT_ERROR_LOCKOUT => (Error::VENDOR, 7), // Lockout handled via vendor code
+                    FINGERPRINT_ERROR_LOCKOUT => (Error::VENDOR, 7),
                     other => (Error::VENDOR, other),
                 };
                 log_warn!("Fingerprint ERROR reported: {:?} (vendorCode={})", err, vendor_code);

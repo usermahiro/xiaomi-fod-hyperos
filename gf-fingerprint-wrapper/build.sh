@@ -35,9 +35,9 @@ Environment variables:
   ANDROID_NDK_HOME  Path to Android NDK toolchain
   API_LEVEL         Target Android API level (default: 31)
   CARGO             Path to cargo binary
-  FOD_DELAY_US      Jeda pengganti uevent di libgf_hal (us, default 30000). Lebih kecil = FOD lebih responsif
-  PATCH_STRICT=1    Tolak libgf_hal.so yang hash-nya belum dikenal patcher
-  PREBUILT_BIN      (test) lewati cargo dan pakai biner ini
+  FOD_DELAY_US      uevent delay in libgf_hal (us, default 30000). Lower = faster FOD
+  PATCH_STRICT=1    reject libgf_hal.so with unknown hash
+  PREBUILT_BIN      (test) skip cargo and use this binary
 EOF
     exit 0
 }
@@ -204,7 +204,7 @@ fi
 else
     PROFILE="${PROFILE:-release}"
     BIN="$PREBUILT_BIN"
-    log_warn "PREBUILT_BIN diset: melewati cargo/NDK ($BIN)"
+    log_warn "PREBUILT_BIN set: skipping cargo/NDK ($BIN)"
     cd "$SCRIPT_DIR"
 fi
 
@@ -252,7 +252,7 @@ ODM_SRC="${SCRIPT_DIR}/prebuilt"
 if [ -d "$ODM_SRC" ]; then
     log_info "Assembling odm layout (delay ${FOD_DELAY_US}us)..."
     for f in lib64/libgf_hal.so lib64/hw/gf_fingerprint.default.so; do
-        [ -f "$ODM_SRC/$f" ] || { log_error "prebuilt/$f tidak ada"; exit 1; }
+        [ -f "$ODM_SRC/$f" ] || { log_error "prebuilt/$f missing"; exit 1; }
     done
     mkdir -p "$OUT_DIR/odm/lib64/hw"
 
@@ -262,11 +262,11 @@ if [ -d "$ODM_SRC" ]; then
         -o "$OUT_DIR/odm/lib64/libgf_hal.so" "${PATCH_ARGS[@]}"
 
     if cmp -s "$ODM_SRC/lib64/libgf_hal.so" "$OUT_DIR/odm/lib64/libgf_hal.so"; then
-        log_error "libgf_hal.so hasil patch identik dengan aslinya"; exit 1
+        log_error "patched libgf_hal.so is identical to original"; exit 1
     fi
     python3 -I "${SCRIPT_DIR}/patch_libgf_hal.py" "$OUT_DIR/odm/lib64/libgf_hal.so" \
-        --delay-us "$FOD_DELAY_US" --check | grep -q "0 instruksi akan diubah" \
-        || { log_error "verifikasi ulang patch gagal"; exit 1; }
+        --delay-us "$FOD_DELAY_US" --check | grep -q "0 instructions to change" \
+        || { log_error "patch re-verification failed"; exit 1; }
 
     cp -f "$ODM_SRC/lib64/hw/gf_fingerprint.default.so" "$OUT_DIR/odm/lib64/hw/"
     if [ -f "$ODM_SRC/etc/init/fingerprint-default.rc" ]; then
@@ -275,7 +275,7 @@ if [ -d "$ODM_SRC" ]; then
     fi
     find "$OUT_DIR/odm" -type f -exec chmod 0644 {} +
 else
-    log_warn "prebuilt/ tidak ada; paket hanya berisi vendor/"
+    log_warn "prebuilt/ missing; package contains vendor/ only"
 fi
 
 log_info "Packaging distribution archives (vendor + odm)..."
@@ -304,4 +304,4 @@ echo -e "${BOLD}Output Files (${OUT_DIR}):${NC}"
 ls -lh "${OUT_DIR}" | grep -E '\.(tar\.gz|zip)$' || true
 echo ""
 echo -e "${BOLD}Package Files Structure:${NC}"
-find "${OUT_DIR}/vendor" "${OUT_DIR}/odm" -type f -exec ls -lh {} + 2>/dev/null
+find "${PKG_DIRS[@]/#/${OUT_DIR}/}" -type f -exec ls -lh {} +
