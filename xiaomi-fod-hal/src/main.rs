@@ -1,17 +1,5 @@
 #![allow(non_snake_case)]
 
-//! xiaomi_fod_hal - Xiaomi FOD HAL shim for HyperOS/MIUI ports on MTK.
-//!
-//! Services:
-//!   vendor.xiaomi.hardware.fingerprintextension.IXiaomiFingerprint/default
-//!   vendor.xiaomi.hw.touchfeature.ITouchFeature/default
-//!
-//! Policy (ported from usermahiro/Oplus-UDFPS-Bridge-Transsion):
-//!   - HBM is only lit while a fingerprint session is active AND a finger is
-//!     physically down on the FOD area.
-//!   - Finger up / session end forces HBM off (with retries against re-latch).
-//!   - FOD gesture nodes are enabled only for the duration of a session.
-
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::io::AsRawFd;
@@ -54,8 +42,6 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-// ------------------------------------------------------------------- HBM I/O
-
 fn hbm_read() -> String {
     std::fs::read_to_string(HBM_NODE)
         .map(|s| s.trim().to_string())
@@ -85,9 +71,6 @@ fn write_hbm(on: bool, reason: &str) {
 }
 
 fn arm(reason: &str) {
-    // The AIDL fingerprint wrapper owns HBM. The shim only exposes the
-    // MIUI vendor binder services; driving the panel here lit HBM while the
-    // user was just scrolling with a stale session.
     LAST_DOWN_MS.store(now_ms(), Ordering::SeqCst);
     tracing::debug!("[HBM] arm skipped ({reason}) - owned by fp_bridge");
 }
@@ -109,8 +92,6 @@ fn spawn_idle_guard(hold_ms: u64) {
         }
     });
 }
-
-// ---------------------------------------------------------- gesture / FOD key
 
 fn write_node(path: &str, val: &[u8]) {
     if let Err(e) = std::fs::write(path, val) {
@@ -143,9 +124,14 @@ struct InputEvent {
     value: i32,
 }
 
+/// The wrapper (fp_bridge) is the sole FOD-key injector; flip only for tests
+/// without the wrapper running, otherwise the capture key is sent twice.
+const INJECT_FOD_KEY: bool = false;
+
 fn inject_fod_key(value: i32) {
-    return; // wrapper is the sole FOD-key injector
-    #[allow(unreachable_code)]
+    if !INJECT_FOD_KEY {
+        return;
+    }
     if now_ms().saturating_sub(LAST_FOD_KEY_MS.load(Ordering::SeqCst)) < 250 {
         return; // kernel already emitted it
     }
@@ -170,8 +156,6 @@ fn inject_fod_key(value: i32) {
     let _ = dev.flush();
 }
 
-// ------------------------------------------------------------------- session
-
 fn set_session(active: bool, reason: &str) {
     if SESSION_ACTIVE.swap(active, Ordering::SeqCst) == active {
         return;
@@ -184,9 +168,7 @@ fn set_session(active: bool, reason: &str) {
     }
 }
 
-/// Follow framework fingerprint session boundaries from logcat, same idea as
-/// fodbridge.cpp: MIUI never calls extCmd() on this port, so the HAL's own log
-/// is the only reliable session signal.
+/// fodbridge.cpp: MIUI never calls extCmd()
 fn spawn_session_watcher() {
     std::thread::spawn(move || loop {
         let child = Command::new("/system/bin/logcat")
@@ -235,8 +217,6 @@ fn spawn_session_watcher() {
     });
 }
 
-// -------------------------------------------------------------- touch watcher
-
 fn in_fod_area(x_raw: i64, y_raw: i64) -> bool {
     // mtk-tpd reports 0..17279 / 0..38399 = 16x the 1080x2400 panel.
     let dx = x_raw / 16 - 540;
@@ -261,7 +241,10 @@ fn spawn_input_watcher() {
         };
         if let Some(out) = child.stdout.take() {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
-                let p: Vec<&str> = line.split_whitespace().collect();
+                let mut p: Vec<&str> = line.split_whitespace().collect();
+                if p.first().map_or(false, |t| t.ends_with(':')) {
+                    p.remove(0);
+                }
                 if p.len() < 3 {
                     continue;
                 }
@@ -290,7 +273,7 @@ fn spawn_input_watcher() {
                         continue;
                     }
                     if val != 0 {
-                        // No session -> never light the panel (anti stuck-HBM).
+                        // No session
                         if !SESSION_ACTIVE.load(Ordering::SeqCst) {
                             continue;
                         }
@@ -310,8 +293,6 @@ fn spawn_input_watcher() {
         std::thread::sleep(Duration::from_millis(500));
     });
 }
-
-// -------------------------------------------------------------- AIDL service
 
 struct FpExtHal;
 impl Interface for FpExtHal {}
@@ -376,8 +357,6 @@ impl ITouchFeature for TouchHal {
     }
 }
 
-// -------------------------------------------------------------------- props
-
 fn prop_get(name: &str) -> String {
     Command::new("/system/bin/getprop")
         .arg(name)
@@ -405,13 +384,11 @@ fn setup_props() {
     prop_set("vendor.fingerprint.aidl.support", "1");
 }
 
-// --------------------------------------------------------------------- main
-
 fn usage() -> ! {
     eprintln!(
         "xiaomi_fod_hal {}\n\
          usage:\n\
-           xiaomi_fod_hal [--daemon] [--timeout MS]\n\
+           xiaomi_fod_hal [--daemon] [--no-touch] [--timeout MS]\n\
            xiaomi_fod_hal --hbm on|off\n\
            xiaomi_fod_hal --props | --status",
         env!("CARGO_PKG_VERSION")
@@ -432,6 +409,8 @@ fn main() -> Result<(), anyhow::Error> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut mode = "daemon";
     let mut hold_ms: u64 = 5_000;
+    let mut no_touch = false;
+    let mut hbm_on: Option<bool> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -440,7 +419,16 @@ fn main() -> Result<(), anyhow::Error> {
                 i += 1;
                 hold_ms = args.get(i).and_then(|v| v.parse().ok()).unwrap_or(5_000);
             }
-            "--hbm" => { i += 1; mode = "hbm"; }
+            "--no-touch" => no_touch = true,
+            "--hbm" => {
+                i += 1;
+                mode = "hbm";
+                hbm_on = match args.get(i).map(String::as_str) {
+                    Some("on") => Some(true),
+                    Some("off") => Some(false),
+                    _ => usage(),
+                };
+            }
             "--props" => mode = "props",
             "--status" => mode = "status",
             "-h" | "--help" => usage(),
@@ -451,7 +439,7 @@ fn main() -> Result<(), anyhow::Error> {
 
     match mode {
         "hbm" => {
-            write_hbm(args.iter().any(|a| a == "on"), "cli");
+            write_hbm(hbm_on.unwrap_or(false), "cli");
             return Ok(());
         }
         "props" => { setup_props(); return Ok(()); }
@@ -487,10 +475,12 @@ fn main() -> Result<(), anyhow::Error> {
         .map_err(|e| anyhow!("register {FP_SERVICE}: {e}"))?;
     tracing::info!("[HAL] registered {FP_SERVICE}");
 
-    let touch = BnTouchFeature::new_binder(TouchHal);
-    rsbinder::hub::add_service(TOUCH_SERVICE, touch.as_binder())
-        .map_err(|e| anyhow!("register {TOUCH_SERVICE}: {e}"))?;
-    tracing::info!("[HAL] registered {TOUCH_SERVICE}");
+    if !no_touch {
+        let touch = BnTouchFeature::new_binder(TouchHal);
+        rsbinder::hub::add_service(TOUCH_SERVICE, touch.as_binder())
+            .map_err(|e| anyhow!("register {TOUCH_SERVICE}: {e}"))?;
+        tracing::info!("[HAL] registered {TOUCH_SERVICE}");
+    }
 
     rsbinder::ProcessState::join_thread_pool()?;
     Ok(())

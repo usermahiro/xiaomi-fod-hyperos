@@ -22,9 +22,6 @@ static HBM_GENERATION: AtomicU64 = AtomicU64::new(0);
 fn read_tran() -> Option<i32> {
     let raw = fs::read_to_string(TRAN_LCM_HBM_STATE).ok()?;
     let t = raw.trim();
-    // This panel node reports a hex register value (e.g. "0xFA") that never
-    // changes with the boost. Treat anything other than literal 0/1 as
-    // unknown so the disable path does not retry or log a false "still on".
     match t {
         "0" => Some(0),
         "1" => Some(1),
@@ -84,9 +81,9 @@ impl HbmController {
         self.is_enabled = enabled;
         if changed {
             if enabled {
-                log_info!("Hardware LCM HBM & OPPO display enabled");
+                log_info!("Hardware LCM HBM display enabled");
             } else {
-                log_info!("Hardware LCM HBM & OPPO display disabled");
+                log_info!("Hardware LCM HBM display disabled");
             }
         }
     }

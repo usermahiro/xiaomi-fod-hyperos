@@ -1,16 +1,3 @@
-//! Props the ColorOS UI needs to draw an under-display fingerprint icon.
-//!
-//! The optical geometry props and `persist.vendor.fingerprint.sensor_type` are
-//! not shipped in any prop file of the ported ROMs. The stock HAL set them once,
-//! so their values lived in `/data/property`. A format data wipes that
-//! directory, nothing puts them back, and SystemUI falls back to the rear
-//! fingerprint layout, while this HAL and the sensor keep working because the
-//! touch target here is a compile-time constant.
-//!
-//! Setting them from the HAL removes both the prop file and the manual
-//! `setprop` from the install: the values are rewritten before SystemUI starts,
-//! and again whenever anything changes them.
-
 use crate::{log_info, log_warn};
 use std::ffi::CString;
 use std::time::Duration;
@@ -31,17 +18,11 @@ unsafe fn __system_property_set(_name: *const libc::c_char, _value: *const libc:
     0
 }
 
-/// Rewritten every time they drift. SystemUI picks the optical layout from
-/// `sensor_type`; a rear/side value or an empty one is what produces the
-/// "backfp" icon on a working sensor.
 const ENFORCED: &[(&str, &str)] = &[
     ("persist.vendor.fingerprint.sensor_type", "optical"),
     ("vendor.fingerprint.aidl.support", "1"),
 ];
 
-/// Written only when the ROM left them empty. These describe the panel, so an
-/// existing value is the device's own and is left alone: forcing 540::2172 onto
-/// a panel that is not 1080x2436 would move the icon off the sensor.
 const DEFAULTS: &[(&str, &str)] = &[
     ("persist.vendor.fingerprint.optical.iconsize", "200"),
     ("persist.vendor.fingerprint.optical.iconlocation", "228"),
@@ -49,8 +30,6 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("persist.vendor.fingerprint.optical.iconnumber", "5"),
 ];
 
-/// A property set from here is a normal write: root can still change it. The
-/// guard only means a change does not last.
 const GUARD_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn get(key: &str) -> String {
@@ -78,9 +57,6 @@ fn set(key: &str, value: &str) -> bool {
     unsafe { __system_property_set(c_key.as_ptr(), c_value.as_ptr()) == 0 }
 }
 
-/// One pass: enforce the two the UI cannot work without, then fill the geometry
-/// the ROM forgot. Logs only what it actually changes, so a guard pass on a
-/// healthy device is silent.
 pub fn enforce() {
     for (key, want) in ENFORCED {
         if get(key) == *want {
@@ -105,9 +81,6 @@ pub fn enforce() {
     }
 }
 
-/// Re-applies in the background. `persist.*` values only matter until the next
-/// format, but the process runs for days: an override from a settings app or a
-/// late boot script should not leave the device on the rear layout.
 pub fn spawn_guard() {
     std::thread::spawn(|| loop {
         std::thread::sleep(GUARD_INTERVAL);

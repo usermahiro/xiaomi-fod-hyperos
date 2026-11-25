@@ -13,16 +13,9 @@ use crate::android::hardware::keymaster::HardwareAuthToken::HardwareAuthToken;
 use crate::android::hardware::keymaster::Timestamp::Timestamp;
 use crate::{log_debug, log_info, log_warn};
 
-/// Jeda setelah sample enroll sebelum capture berikutnya (biar animasi progress sempat jalan)
-
-/// Jeda sebelum retry auth saat jari masih menempel
 const HOLD_AUTH_REARM_MS: u64 = 350;
-/// Maks retry auth otomatis per sentuhan (Android lockout setelah 5 gagal)
 const HOLD_AUTH_REARM_MAX: u32 = 3;
-/// Sesi authenticate yang dimulai HAL sendiri (SOFOD) dianggap basi setelah selama ini
-/// kalau layar sudah ON; di bawah itu masih alur wake SOFOD yang sedang dilayani.
 const AUTO_SESSION_GRACE_MS: u128 = 2000;
-/// Lama "jari terangkat" palsu antara HBM off dan on
 const HOLD_FAKE_UP_MS: u64 = 80;
 
 pub const HARDWARE_MODULE_TAG: u32 = 0x48574D54; // 'HWMT'
@@ -262,8 +255,7 @@ pub struct FingerprintHal {
     is_goodix: bool,
     current_callback: Arc<Mutex<Option<Strong<dyn ISessionCallback>>>>,
     is_active: AtomicBool,
-    /// true when the current session was started by this HAL itself (SOFOD auto-start),
-    /// not by the framework. The framework does not know about it and never cancels it.
+    /// true when the current session was started by this HAL itself
     auto_session: AtomicBool,
     auto_session_at: Mutex<Option<std::time::Instant>>,
     is_finger_down: AtomicBool,
@@ -282,11 +274,8 @@ pub struct FingerprintHal {
     fn_silfp_worker_screen_state: Option<FnSilfpWorkerScreenState>,
     saved_enroll_fid: AtomicI32,
     step_captured: AtomicBool,
-    /// Jari fisik masih menempel di sensor (di-set pointer_down, di-clear pointer_up/cancel)
     finger_held: AtomicBool,
-    /// Generasi rearm; dinaikkan tiap pointer_up/cancel supaya rearm yang tertunda batal
     rearm_gen: AtomicU32,
-    /// Jumlah rearm auth berturut-turut dalam satu sentuhan (batasi biar tidak lockout)
     auth_rearm_count: AtomicU32,
     pub screen_state: AtomicI32,
 }
@@ -339,14 +328,7 @@ impl FingerprintHal {
     }
 
     fn open() -> anyhow::Result<Arc<Self>> {
-        // Goodix devices commonly split the wrapper and implementation:
-        // libgf_hal.so is the implementation, while gf_fingerprint.default.so
-        // exports the legacy fingerprint HAL module. Preload the implementation
-        // globally so its symbols and dependencies resolve from /odm.
         let goodix_impl_paths = [
-            // Patched copy from /data (uevent wait replaced by a fixed delay).
-            // SONAME is still libgf_hal.so, so gf_fingerprint.default.so's
-            // DT_NEEDED resolves to this already-loaded handle.
             "/data/local/tmp/libgf_hal_patched.so",
             "/odm/lib64/libgf_hal.so",
             "/vendor/lib64/libgf_hal.so",
@@ -632,10 +614,6 @@ impl FingerprintHal {
         Ok(hal)
     }
 
-    /// Last-resort guard for the "HBM stays lit" bug: enrolment/authentication end
-    /// through many paths (session close, framework cancel, vendor error, duplicate
-    /// vendor events), so one periodic check guarantees the panel is turned off even
-    /// when a path misses its own cleanup.
     fn start_hbm_idle_guard(hal: Arc<Self>) {
         const INTERVAL_MS: u64 = 1_500;
         let spawned = std::thread::Builder::new()
@@ -689,8 +667,6 @@ impl FingerprintHal {
     }
 
     pub fn notify_framework_touch(&self, is_down: bool) {
-        // MIUI SystemUI does not implement the ColorOS 1011 custom transact.
-        // Fail once, then skip it so SOFOD captures are not spammed.
         use std::sync::atomic::{AtomicBool, Ordering};
         static UNSUPPORTED: AtomicBool = AtomicBool::new(false);
         if UNSUPPORTED.load(Ordering::SeqCst) {
@@ -722,14 +698,9 @@ impl FingerprintHal {
             }
         };
 
-        // Standard Android 11+ Parcel interface token header:
-        // 1. StrictMode policy (0)
         let strict_policy: i32 = 0;
-        // 2. WorkSource (-1)
         let work_source: i32 = -1;
-        // 3. Android 11+ INTERFACE_HEADER magic: 0x53595354 ("SYST")
         let header: u32 = 0x53595354;
-        // 4. Interface descriptor String16
         let descriptor = "android.hardware.biometrics.fingerprint.ISessionCallback";
 
         if let Err(e) = parcel.write(&strict_policy) {
@@ -749,10 +720,6 @@ impl FingerprintHal {
             return;
         }
 
-        // ColorOS Framework onTransactFromHal expects:
-        // cmdId: 1201 (0x4b1) for TouchDown, 1202 (0x4b2) for TouchUp
-        // resultLen: 8
-        // result: 8-byte little-endian timestamp (SystemClock.uptimeMillis())
         let cmd_id: i32 = if is_down { 1201 } else { 1202 };
         let now_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
             Ok(d) => d.as_millis() as u64,
@@ -806,8 +773,6 @@ impl FingerprintHal {
     }
 
     pub fn post_enroll(&self, challenge: u64) {
-        // Enrolment is finished from the framework's point of view: whatever the last
-        // touch left behind must not keep the panel boosted.
         crate::hbm::set_hbm(false);
         self.is_finger_down.store(false, Ordering::SeqCst);
         self.finger_held.store(false, Ordering::SeqCst);
@@ -863,8 +828,7 @@ impl FingerprintHal {
         }
     }
 
-    /// SOFOD: the screen is off/doze and nobody started a session. Start one ourselves
-    /// and remember that, so it can be torn down again if it ends up unused.
+    /// SOFOD: the screen is off/doze and nobody started a session.
     pub fn start_auto_authenticate(&self) -> i32 {
         let ret = self.authenticate(0);
         *self.auto_session_at.lock() = Some(std::time::Instant::now());
@@ -872,8 +836,6 @@ impl FingerprintHal {
         ret
     }
 
-    /// True when a HAL-started session exists and is older than `min_age_ms`.
-    /// A young one is the SOFOD wake flow that is still being served right now.
     fn auto_session_stale(&self, min_age_ms: u128) -> bool {
         self.auto_session.load(Ordering::SeqCst)
             && self
@@ -882,8 +844,6 @@ impl FingerprintHal {
                 .map_or(true, |t| t.elapsed().as_millis() >= min_age_ms)
     }
 
-    /// Tear down a session that this HAL started itself. No-op for framework sessions
-    /// and for auto sessions younger than `min_age_ms`.
     pub fn end_auto_session(&self, why: &str, min_age_ms: u128) {
         if !self.auto_session_stale(min_age_ms) {
             return;
@@ -896,10 +856,6 @@ impl FingerprintHal {
 
     pub fn authenticate(&self, operation_id: u64) -> i32 {
         self.auto_session.store(false, Ordering::SeqCst);
-        // Do NOT clear HBM here. On MIUI the framework often calls authenticate()
-        // *after* the SOFOD touch already lit the panel; clearing it here kills
-        // the illumination right before Goodix captures. Session end / finger-up
-        // and the watchdog are the only places that turn HBM off.
         if self.is_goodix {
             let dev = unsafe { &mut *(self.device as *mut goodix_fingerprint_device_t) };
             if let Some(auth_fn) = dev.authenticate {
@@ -924,8 +880,6 @@ impl FingerprintHal {
     }
 
     pub fn set_screen_state(&self, mut state: i32) {
-        // ColorOS notifyScreenStateToHal reports 0 for both deep sleep and AOD.
-        // If state is reported as 0 but DRM display DPMS is still ON, the display is in AOD / Doze mode (state 2).
         if state == 0 && Self::is_display_dpms_on() {
             log_info!("Screen state reported 0, but DPMS is ON -> resolving to Doze/AOD (state 2)");
             state = 2;
@@ -934,14 +888,12 @@ impl FingerprintHal {
         let old = self.screen_state.swap(state, Ordering::SeqCst);
         log_info!("FingerprintHal::set_screen_state transition: {} -> {}", old, state);
 
-        // Notify Silead worker thread so its internal screen state ([0x6b23c]) matches hardware
         if let Some(cb) = self.fn_silfp_worker_screen_state {
             let vendor_state = if state == 0 { 0 } else { 1 };
             let ret = unsafe { cb(vendor_state) };
             log_info!("silfp_worker_screen_state_callback({}) returned {}", vendor_state, ret);
         }
 
-        // Ensure HBM is deactivated and finger state reset when entering screen OFF
         if state == 0 {
             crate::hbm::set_hbm(false);
             self.is_finger_down.store(false, Ordering::SeqCst);
@@ -972,9 +924,6 @@ impl FingerprintHal {
     }
 
     pub fn get_screen_state(&self) -> i32 {
-        // MIUI never sends ColorOS custom cmd 1011 (notifyScreenStateToHal),
-        // so the stored value stays 1 forever. Derive "off" from the panel
-        // itself instead: deep sleep (DPMS Off) must be 0 or SOFOD is skipped.
         if Self::is_display_dpms_on() {
             1
         } else {
@@ -983,9 +932,6 @@ impl FingerprintHal {
     }
 
     pub fn is_display_dpms_on() -> bool {
-        // DRM dpms stays "On" during doze on this port. The FTS controller
-        // Reg(0xD0)=1 only in screen-off gesture mode -> use it as the
-        // authoritative screen state; fall back to DRM if unavailable.
         if let Ok(s) = std::fs::read_to_string(
             "/sys/class/input/event4/device/device/fts_gesture_mode",
         ) {
@@ -1064,7 +1010,6 @@ impl FingerprintHal {
         };
         log_info!("enumerate invoked, ret = {}", ret);
 
-        // Allow up to 100ms for asynchronous notification from vendor HAL
         for _ in 0..10 {
             if self.enum_completed.load(Ordering::SeqCst) {
                 break;
@@ -1072,9 +1017,6 @@ impl FingerprintHal {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        // Guaranteed fallback: If vendor HAL never called notify (e.g. empty DB or error),
-        // explicitly send onEnrollmentsEnumerated so Android framework's
-        // FingerprintInternalCleanupClient completes and is never stuck!
         if !self.enum_completed.swap(true, Ordering::SeqCst) {
             let list = self.enumerated_ids.lock().clone();
             log_warn!("Vendor HAL enumeration did not report completion; sending onEnrollmentsEnumerated({:?}) fallback", list);
@@ -1121,8 +1063,6 @@ impl FingerprintHal {
 
     // Touch & Optical Illumination Callbacks
     pub fn on_pointer_down(&self, x: i32, y: i32, _minor: f32, _major: f32) {
-        // Calibrate touch boundary: reject any touch outside the calibrated FOD sensor circle
-        // (x == 0 && y == 0 is preserved as a special fallback for hardware gesture keys without coordinates)
         if (x != 0 || y != 0) && !crate::input::is_inside_fod_area(x, y) {
             log_info!(
                 "on_pointer_down at ({}, {}) rejected: outside calibrated FOD area (center: {}, {}, radius: {})",
@@ -1133,9 +1073,6 @@ impl FingerprintHal {
 
         let screen_state = self.get_screen_state();
 
-        // Guard: a session that this HAL started itself (SOFOD) is only valid while the
-        // screen is off/doze. Once the screen is ON the framework owns FOD: a leftover
-        // auto session must not light HBM when the sensor area is touched in an app.
         if self.is_active() && screen_state == 1 && self.auto_session_stale(AUTO_SESSION_GRACE_MS) {
             log_info!("on_pointer_down ignored: stale HAL-started session while screen is ON");
             self.end_auto_session("screen is ON", AUTO_SESSION_GRACE_MS);
@@ -1163,27 +1100,17 @@ impl FingerprintHal {
             x, y, screen_state
         );
 
-        // 1. Notify framework. MIUI's FingerprintServiceStubImpl translates
-        //    AIDL VENDOR(7) -> framework 6; vendorCode 22 -> onAcquired(100,0)
-        //    -> KeyguardUpdateMonitor.onFpsPointerDown() -> FOD press animation.
-        //    START alone only reports latency and never triggers the animation.
         if let Some(cb) = self.current_callback.lock().as_ref() {
             let _ = cb.onAcquired(AcquiredInfo::START, 0);
             let _ = cb.onAcquired(AcquiredInfo::VENDOR, 22);
         }
 
-        // 2. Notify ColorOS framework of touch down via binder transact 1001 (cmd 1201)
-        // This triggers dispatchTouchDown() -> SystemUI reason 8 -> startPressedAnimation()!
         self.notify_framework_touch(true);
 
-        // Acquire wake lock if screen is not awake to keep CPU running during display transition
         if screen_state != 1 {
             crate::input::acquire_wakelock("oplus_udfps_fod_wake");
         }
 
-        // 3. Activate HBM. The MTK node has no boolean read-back (it always
-        //    reports 0xFA), so waiting for a confirmation only burns ~500ms of
-        //    the touch window and makes short SOFOD presses abort.
         crate::hbm::set_hbm(true);
 
         // If finger was lifted while HBM came up, abort capture
@@ -1196,7 +1123,6 @@ impl FingerprintHal {
             return;
         }
 
-        // Fast settling delay (5ms) for CMOS exposure uniformity aligned with ColorOS animation flare
         std::thread::sleep(std::time::Duration::from_millis(5));
 
         // Re-check if finger was lifted during settling delay
@@ -1229,7 +1155,7 @@ impl FingerprintHal {
         self.step_captured.store(false, Ordering::SeqCst);
         log_info!("on_pointer_up (was_down={}, is_active={}) -> deactivating HBM", was_down, self.is_active());
 
-        // MIUI finger-up code (framework 6 / vendorCode 23) -> onAcquired(101,0)
+        // MIUI finger-up
         // -> onFpsPointerUp(), stops the FOD press animation.
         if was_down {
             if let Some(cb) = self.current_callback.lock().as_ref() {
@@ -1251,8 +1177,6 @@ impl FingerprintHal {
             unsafe { msg_send(3) }; // FINGER_UP = 3
         }
 
-        // Notify ColorOS framework of touch up via binder transact 1001 (cmd 1202)
-        // This triggers dispatchTouchUp() -> SystemUI reason 9 -> stops pressed animation!
         self.notify_framework_touch(false);
 
         // Release FOD wake lock
@@ -1347,9 +1271,6 @@ impl FingerprintHal {
                     unsafe { msg_send(3) };
                 }
 
-                // Immediately extinguish HBM backlight!
-                // Optical capture and matching are completed. We must not leave HBM active
-                // when entering homescreen or waiting for finger release!
                 crate::hbm::set_hbm(false);
                 self.is_finger_down.store(false, Ordering::SeqCst);
 
@@ -1367,8 +1288,6 @@ impl FingerprintHal {
                 } else {
                     log_info!("Authentication FAILED (unrecognized finger, keeping session active for next touch)");
                     let _ = cb.onAuthenticationFailed();
-                    // No auto re-arm. A failed touch waits for the next real
-                    // finger press instead of re-triggering capture 3x.
                 }
             }
             FINGERPRINT_ACQUIRED => {
@@ -1382,8 +1301,6 @@ impl FingerprintHal {
                     FINGERPRINT_ACQUIRED_TOO_FAST => (AcquiredInfo::TOO_FAST, 0),
                     FINGERPRINT_ACQUIRED_VENDOR => (AcquiredInfo::VENDOR, 0),
                     1001 | 1002 | 1020 => {
-                        // Suppress Silead internal hardware signals from framework logcat
-                        // (1001 = down, 1002 = up, 1020 = wait ui ready)
                         log_debug!("Vendor internal acquired event: {}", acq_data.acquired_info);
                         return;
                     }
@@ -1403,8 +1320,6 @@ impl FingerprintHal {
                 };
 
                 if !self.is_goodix && self.step_captured.swap(true, Ordering::SeqCst) {
-                    // Duplicate sample for the same touch: the panel was already boosted
-                    // by the first one, so it still has to go off before we bail out.
                     crate::hbm::set_hbm(false);
                     self.is_finger_down.store(false, Ordering::SeqCst);
                     log_debug!("Duplicate enroll step during same touch ignored (raw_remaining={})", raw_remaining);

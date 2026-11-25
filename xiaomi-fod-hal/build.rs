@@ -14,7 +14,6 @@ fn main() {
         .expect("failed to generate FOD AIDL bindings");
 
     // libbinder reserves the two highest transaction codes for interface
-    // metadata; generated code needs to accept them (same fixup as lightsrc).
     let generated = fs::read_to_string(&out_file).expect("read generated bindings");
     let patched = generated
         .lines()

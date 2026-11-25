@@ -1,25 +1,4 @@
 #!/usr/bin/env python3
-"""
-Patcher libgf_hal.so (Goodix FOD, Transsion MTK, arm64) untuk ROM custom/port.
-
-Tiga patch (semua dicari lewat simbol ELF + pola instruksi, bukan offset mati):
-  1. goodix::tran_uevent_handle(const char*, int)
-       -> usleep(DELAY_US); return 1;   (tidak lagi menunggu uevent netlink kernel)
-  2. goodix::CustomizedFingerprintCore::gfHbmEventDetectingThread(void*)
-       -> NOP gate  `ldr w,[x,#0x1b4]; cmp w,#1; b.ne`  (uiReadyStatus)
-  3. goodix::Device::enable()
-       -> `cbz w0,ok` setelah ioctl GF_IOC_INIT menjadi `b ok`
-
-Keamanan: setiap patch memverifikasi instruksi asli sebelum menulis. Jika ada
-yang tidak cocok, tidak ada yang ditulis sama sekali. Aman dijalankan ulang
-(idempotent) dan bisa dipakai untuk mengganti nilai --delay-us.
-
-Pemakaian:
-  python3 patch_libgf_hal.py libgf_hal.so                 # jeda 30 ms (default, = skrip lama)
-  python3 patch_libgf_hal.py libgf_hal.so --delay-us 8000 # lebih cepat
-  python3 patch_libgf_hal.py libgf_hal.so --check         # dry-run, tidak menulis
-  python3 patch_libgf_hal.py libgf_hal.so -o out.so --strict
-"""
 import argparse
 import hashlib
 import struct
@@ -40,8 +19,6 @@ KNOWN_BUILDS = {
 class PatchError(Exception):
     pass
 
-
-# ---------------------------------------------------------------- ELF helpers
 class Elf:
     def __init__(self, data: bytearray):
         self.d = data
@@ -147,11 +124,6 @@ def enc_movw(rd, imm16):
 def is_bl_to(w, pc, target):
     return (w & 0xFC000000) == 0x94000000 and enc_bl(pc, target) == w
 
-
-# -------------------------------------------------------------- patch planners
-# setiap planner mengembalikan (deskripsi, [(va, nilai_baru), ...]) atau
-# (deskripsi, []) jika sudah ter-patch dengan nilai yang sama.
-
 def plan_uevent(elf, delay_us):
     va, size = elf.symbol(SYM_UEVENT)
     if size < 24:
@@ -200,7 +172,6 @@ def plan_init(elf):
             if imm & (1 << 18):
                 imm -= 1 << 19
             tgt = pc + 4 + imm * 4
-            # sanity: ioctl request harus 0x8001xxxx (movk w1,#0x8001,lsl16) tepat sebelum bl
             warn = ""
             if not any((elf.u32(p) & 0xFFFFFFE1) == 0x72B00021 for p in range(pc - 24, pc, 4)):
                 warn = " (PERINGATAN: konstanta ioctl 0x8001xxxx tidak terlihat)"

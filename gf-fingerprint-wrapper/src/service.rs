@@ -444,13 +444,10 @@ pub fn handle_oplus_custom_transact(
 
     let res: i32 = match cmd_id {
         1010 => {
-            // getEnrollmentTotalTimes: ColorOS expects total enrollment steps.
-            // Silead optical UDFPS enrolls in 20 steps (remaining from 19 down to 0).
             log_info!("Handling OPlus custom cmd 1010 (getEnrollmentTotalTimes) -> returning 20 steps");
             20
         }
         1011 => {
-            // notifyScreenStateToHal: in_buffer[0] = screenState (0 = off, 1 = on, 2 = aod/doze)
             let state = in_buffer.first().copied().unwrap_or(1) as i32;
             log_info!("Handling OPlus custom cmd 1011 (notifyScreenStateToHal) -> screenState: {}", state);
             if let Ok(hal) = FingerprintHal::get_instance() {

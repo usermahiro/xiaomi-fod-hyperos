@@ -2,7 +2,7 @@
 name = "xiaomi-fod-hal"
 version = "1.0.0"
 edition = "2021"
-description = "Xiaomi FOD (IXiaomiFingerprint + ITouchFeature) HAL shim for HyperOS/MIUI ports"
+description = "IXiaomiFingerprint ITouchFeature"
 license = "Apache-2.0"
 
 [[bin]]

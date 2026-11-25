@@ -119,6 +119,7 @@ To restore the stock HAL: `adb shell setprop ctl.start vendor.fingerprint-defaul
 Needs `/vendor` rebuilt/reflashed. Use each component's `.rc` and VINTF manifest:
 
 * `xiaomi-fod-hal/init/xiaomi-fod-hal.rc`
+* `xiaomi-fod-hal/manifest_xiaomi_fod.xml`
 * `gf-fingerprint-wrapper/android.hardware.biometrics.fingerprint-service.transsion.rc`
 * `gf-fingerprint-wrapper/manifest_fingerprint_transsion.xml`
 

@@ -9,8 +9,8 @@ use crate::{log_info, log_warn};
 pub const EV_SYN: u16 = 0x00;
 pub const EV_KEY: u16 = 0x01;
 pub const EV_ABS: u16 = 0x03;
-pub const FOD_KEYCODE: u16 = 195;     // 0x00c3 on FocalTech / Transsion mtk-tpd
-pub const KEY_GESTURE_38: u16 = 38;    // 0x0026 on FocalTech FT3683G (Gesture ID 38 FOD tap in deep sleep)
+pub const FOD_KEYCODE: u16 = 195;     // 0x00c3 on FocalTech
+pub const KEY_GESTURE_38: u16 = 38;    // 0x0026 on FocalTech FT3683G
 pub const KEY_F20: u16 = 190;         // 0x00be on adaptive-ts when gesture is 0xbe (FOD)
 pub const KEY_F13: u16 = 183;         // 0x00b7 on adaptive-ts when gesture is 0xcc (Gesture Click)
 pub const BTN_TOUCH: u16 = 330;
@@ -26,8 +26,6 @@ pub const SOFOD_MAJOR: i32 = 80;
 pub const SOFOD_DELAY_MS: u64 = 10;
 pub const SOFOD_HOLD_MS: u64 = 350;
 
-// Calibrated Optical FOD Sensor Location & Touch Target for Transsion Camon 30 Pro (1080x2436)
-// Hardware property persist.vendor.fingerprint.optical.sensorlocation: [540::2172], diameter: 228 (radius: 114)
 pub const FOD_CENTER_X: i32 = 540;
 pub const FOD_CENTER_Y: i32 = 2172;
 pub const FOD_TOUCH_RADIUS: i32 = 140; // 114px sensor radius + 26px thumb margin
@@ -292,8 +290,6 @@ pub fn wake_display_pipeline() {
 
     let (dev_file, path, code) = match find_wake_key_device() {
         Some((f, p)) => {
-            // Pilih keycode dari kemampuan device (bukan dari nama path), karena
-            // path selalu "/dev/input/eventN" dan tidak pernah berisi "tran-keys".
             let bits = get_key_bits(f.as_raw_fd());
             let code = if test_bit(KEY_WAKEUP as usize, &bits) {
                 KEY_WAKEUP
@@ -351,16 +347,9 @@ pub fn wake_display_pipeline() {
     log_info!("wake_display_pipeline: injected KEY {} pulse via {} to exit doze/sleep", code, path);
 }
 
-
-/// Lama logo FOD ditahan (display tetap hidup) setelah sensor disentuh saat screen off.
 pub const SOFOD_LOGO_HOLD_MS: u64 = 5000;
 static LOGO_HOLD_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Fake SOFOD: saat layar benar-benar mati dan sensor ditekan, HAL hanya inject KEY_WAKEUP.
-/// Capture TIDAK dilakukan sekarang; ditandai lewat `pending` dan dieksekusi oleh monitor loop
-/// begitu layar sudah nyala, selama jari masih menempel (tidak perlu tekan ulang).
-/// Wakelock ditahan SOFOD_LOGO_HOLD_MS supaya layar/logo tidak langsung padam.
-/// Return true kalau event ini sudah ditangani (caller skip jalur capture lama).
 pub fn try_screen_off_wake_only(
     _hal: &Arc<crate::hal::FingerprintHal>,
     _fired: &mut bool,
@@ -368,9 +357,6 @@ pub fn try_screen_off_wake_only(
     _x: i32,
     _y: i32,
 ) -> bool {
-    // Disabled on MIUI. Deferring capture until after KEY_WAKEUP made HBM
-    // light up too late (or not at all) once the panel had gone to deep sleep.
-    // The normal path now wakes the display pipeline and lights HBM directly.
     false
 }
 
@@ -463,7 +449,6 @@ pub fn load_sofod_config() -> SofodConfig {
     cfg
 }
 
-/// Jendela "diam": event KEY 0xC3 hasil injeksi kita sendiri jangan diproses ulang oleh monitor.
 static INJECT_QUIET: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
 pub fn mark_fod_key_injection() {
@@ -477,9 +462,6 @@ pub fn fod_key_injection_quiet() -> bool {
     }
 }
 
-/// Inject EV_KEY 0x00C3 (value 1 = down, 0 = up) ke touchscreen.
-/// Goodix HAL (gfFingerTouchEventDetectingThread) membaca langsung event ini dari /dev/input/eventN:
-/// KEY 0xC3 value 1 = FINGER_DOWN, value 0 = FINGER_UP. Ini satu-satunya trigger capture-nya.
 pub fn inject_fod_key(value: i32) -> bool {
     let dev_path = match find_touchscreen_device() {
         Some(p) => p,
@@ -558,8 +540,6 @@ pub fn refire_sofod_touch(px: i32, py: i32, default_path: &str) {
             ];
             let _ = write_input_events(&mut dev, &down_events);
 
-            // Goodix HAL hanya capture saat melihat KEY 0xC3 DOWN. Kernel sudah mengirimnya saat
-            // sentuhan pertama (layar mati), tapi saat itu sesi authenticate belum aktif -> hilang.
             mark_fod_key_injection();
             let key_down = [
                 InputEvent::new(EV_KEY, FOD_KEYCODE, 1),
@@ -660,7 +640,7 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                                     };
 
                                     if event.type_ == EV_KEY && event.code == FOD_KEYCODE && fod_key_injection_quiet() {
-                                        continue; // event KEY 0xC3 dari injeksi kita sendiri
+                                        continue; // event KEY 0xC3
                                     }
                                     if event.type_ == EV_ABS {
                                         if event.code == ABS_MT_POSITION_X {
@@ -732,9 +712,6 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                                                     }
                                                 }
                                             }
-                                            // NOTE: We deliberately DO NOT cancel FOD on event.value == 0 (KEY up)!
-                                            // The touch controller emits key release almost immediately (~250ms)
-                                            // while the finger remains pressed. Real finger lift is tracked by
                                             // ABS_MT_TRACKING_ID == -1 and BTN_TOUCH == 0.
                                         } else if event.code == KEY_F20 || event.code == KEY_F13 {
                                             if event.value == 1 {
@@ -764,8 +741,6 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                                                         is_down = true;
                                                         last_down_time = std::time::Instant::now();
                                                         hal.on_pointer_down(tx, ty, 0.0, 0.0);
-                                                        // Goodix captures only on KEY 0xC3 DOWN. The kernel FOD key in deep
-                                                        // sleep fires before a session exists -> re-trigger now that HBM is on.
                                                         refire_sofod_touch(tx, ty, &path);
                                                     }
                                                 }
@@ -789,8 +764,6 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                                             }
                                         }
                                     } else if event.type_ == EV_SYN && event.code == 0 {
-                                        // SYN_REPORT: Full multi-touch frame synchronized
-                                        // Only trigger in deep sleep / doze. When screen is ON (state 1), framework dispatches onPointerDown!
                                         if touch_active && !is_down && hal.get_screen_state() != 1 {
                                             if is_inside_fod_area(cur_x, cur_y) {
                                                 if try_screen_off_wake_only(&hal, &mut wake_fired, &mut pending_capture, cur_x, cur_y) {
@@ -829,9 +802,6 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                         break;
                     }
 
-
-                    // Fake SOFOD: layar sudah nyala setelah KEY_WAKEUP dan jari masih menempel
-                    // -> langsung capture tanpa perlu tekan ulang.
                     if let Some((t0, px, py)) = pending_capture {
                         let el = t0.elapsed();
                         if el >= std::time::Duration::from_millis(1500) {
@@ -841,7 +811,6 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                             && el >= std::time::Duration::from_millis(120)
                         {
                             pending_capture = None;
-                            // Beri waktu framework (keyguard) memulai sesi authenticate
                             let mut waited = 0;
                             while !hal.is_active() && waited < 1500 {
                                 std::thread::sleep(std::time::Duration::from_millis(20));
@@ -860,14 +829,11 @@ pub fn start_screen_off_touch_monitor(hal: Arc<crate::hal::FingerprintHal>) {
                         }
                     }
 
-                    // If HAL cleared finger state (e.g. on screen transition to sleep/off or session cancel), sync is_down
                     if is_down && !hal.is_finger_down() {
                         is_down = false;
                         release_wakelock("oplus_udfps_fod_wake");
                     }
 
-                    // Watchdog: prevent HBM from ever being stuck on (> 1500ms)
-                    // Selama sesi auth/enroll aktif dan jari masih menempel (hold-rearm), beri waktu lebih panjang.
                     let wd_ms = if hal.is_active() && hal.is_finger_held() { 12000 } else { 1500 };
                     if is_down && last_down_time.elapsed() >= std::time::Duration::from_millis(wd_ms) {
                         log_warn!("Watchdog: FOD touch timed out ({}ms) -> forcing HBM off", wd_ms);

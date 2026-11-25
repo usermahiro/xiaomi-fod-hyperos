@@ -32,10 +32,6 @@ fn main() -> anyhow::Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
 
-    // The props ColorOS needs to treat this as an under-display sensor, before
-    // SystemUI reads them. They are the reason this source no longer needs a
-    // prop file: the values live in /data/property, a format data wipes them,
-    // and nothing in the ported ROM puts them back.
     oplus_udfps_bridge_transsion::props::enforce();
     oplus_udfps_bridge_transsion::props::spawn_guard();
 

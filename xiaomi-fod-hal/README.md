@@ -1,6 +1,6 @@
 # xiaomi_fod_hal
 
-Shim HAL FOD Xiaomi untuk port HyperOS/MIUI di perangkat Transsion (MT6789).
+Shim HAL FOD Xiaomi HyperOS in Transsion (MT6789).
 
 Masalahnya: vendor Transsion cuma sediakan `android.hardware.biometrics.fingerprint.IFingerprint`
 (AIDL) untuk auth. Framework/SystemUI MIUI juga butuh dua service vendor ini:
@@ -8,10 +8,7 @@ Masalahnya: vendor Transsion cuma sediakan `android.hardware.biometrics.fingerpr
 - `vendor.xiaomi.hardware.fingerprintextension.IXiaomiFingerprint/default`
 - `vendor.xiaomi.hw.touchfeature.ITouchFeature/default`
 
-Tanpa keduanya, FOD (lingkaran terang di area sensor) tidak pernah menyala dan
-prop geometri FOD tidak ada.
-
-## Yang dilakukan
+## Todo
 
 1. Mendaftarkan kedua service AIDL di atas (nama + transaction code identik dengan
    implementasi Xiaomi asli, jadi tidak perlu patch framework/SystemUI).
@@ -30,7 +27,7 @@ prop geometri FOD tidak ada.
 
 HAL fingerprint Transsion bawaan **tidak diganti** — ini hanya menambah sisi Xiaomi.
 
-## Pemakaian (runtime, /data/local/tmp)
+## Test runtime
 
 ```sh
 adb push xiaomi_fod_hal /data/local/tmp/
@@ -38,42 +35,6 @@ adb shell 'kill -9 $(pidof xiaomi_fod_hal) 2>/dev/null'
 adb shell 'nohup /data/local/tmp/xiaomi_fod_hal > /data/local/tmp/fod_hal.log 2>&1 < /dev/null &'
 adb shell '/data/local/tmp/xiaomi_fod_hal --status'
 ```
-
-Uji HBM langsung:
-
-```sh
-adb shell '/data/local/tmp/xiaomi_fod_hal --hbm on'
-adb shell 'cat /sys/kernel/tran_display/lcm_hbm_state'
-adb shell '/data/local/tmp/xiaomi_fod_hal --hbm off'
-```
-
-Uji binder service:
-
-```sh
-adb shell 'service call vendor.xiaomi.hardware.fingerprintextension.IXiaomiFingerprint/default 1 i32 4 i32 3'
-adb shell 'cat /data/local/tmp/fod_hal.log'
-```
-
-## Opsi
-
-| opsi | fungsi | default |
-|---|---|---|
-| `--daemon` | mode normal (default) | - |
-| `--no-touch` | jangan daftarkan ITouchFeature | - |
-| `--timeout MS` | watchdog HBM | 15000 |
-| `--hbm on\|off` | tulis langsung sysfs, lalu exit | - |
-| `--props` | set prop FOD saja, lalu exit | - |
-| `--status` | lihat state HBM + prop | - |
-
-## Catatan
-
-- `/sys/kernel/tran_display/lcm_hbm_state` bacaannya bukan `0/1`, tapi nilai register
-  heksa (mis. `0xFA`). Yang ditulis tetap `1` / `0`.
-- Kalau SystemUI sudah cache prop FOD saat boot, restart SystemUI:
-  `am force-stop com.android.systemui` (atau reboot) setelah prop diset.
-- Untuk permanen: taruh binary di `/vendor/bin/hw/xiaomi_fod_hal`, rc di
-  `/vendor/etc/init/`, manifest VINTF untuk dua interface tersebut, lalu rebuild
-  image vendor (vendor di perangkat ini erofs read-only).
 
 ## Referensi
 

@@ -1,6 +1,4 @@
 #!/bin/bash
-# Build the MIUI vendor shim (xiaomi_fod_hal) for aarch64-linux-android.
-# Usage: ANDROID_NDK_HOME=/path/to/ndk bash build.sh [release|debug]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

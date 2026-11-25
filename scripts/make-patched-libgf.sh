@@ -1,6 +1,4 @@
 #!/bin/bash
-# Pull libgf_hal.so from a rooted device and patch it for ported ROMs.
-# Usage: ./scripts/make-patched-libgf.sh [serial] [delay_us]
 set -euo pipefail
 SERIAL="${1:-}"
 DELAY="${2:-30000}"
