@@ -33,13 +33,18 @@ ro.vendor.localhbm.enable=1                    # LHBM path
 persist.vendor.sys.fp.vendor=goodix            # <-- the critical one
 persist.vendor.fingerprint.sensor_type=optical
 vendor.fingerprint.aidl.support=1
-persist.vendor.sys.fp.fod.location.X_Y=430,2068  # top-left of 220x220 icon
-persist.vendor.sys.fp.fod.size.width_height=220,220
+persist.vendor.sys.fp.fod.location.X_Y=370,2002  # top-left of 340x340 icon
+persist.vendor.sys.fp.fod.size.width_height=340,340
 ```
 
-Geometry follows the panel: mtk-tpd reports 16x panel coordinates
-(`0..17279` / `0..38399` for 1080x2400), so the watcher divides by 16 before
-testing the FOD circle centred at `(540, 2178)`.
+Geometry follows the optical sensor reported by the stock ROM
+(`persist.vendor.fingerprint.optical.sensorlocation=540::2172`). MIUI's
+`location.X_Y` is the **top-left** corner, so a 340x340 icon centred on the
+sensor starts at `(370, 2002)`. The shim writes these geometry props on every
+start so a stale value from an older build cannot move the icon. mtk-tpd
+reports 16x panel coordinates (`0..17279` / `0..38399` for 1080x2400), so the
+watcher divides by 16 before testing the FOD circle at `(540, 2172)` with
+radius 170.
 
 ## HBM policy (the "stuck HBM" fix)
 

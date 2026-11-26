@@ -26,6 +26,21 @@ const TOUCH_SERVICE: &str = "vendor.xiaomi.hw.touchfeature.ITouchFeature/default
 const HBM_NODE: &str = "/sys/kernel/tran_display/lcm_hbm_state";
 const TOUCH_NODE: &str = "/dev/input/event4";
 
+/// FOD icon geometry, tuned on the Infinix X6886 panel. MIUI's
+/// persist.vendor.sys.fp.fod.location.X_Y is the TOP-LEFT corner, not the
+/// centre; keep the centre on the optical sensor reported by the stock ROM
+/// (persist.vendor.fingerprint.optical.sensorlocation = 540::2172).
+const FOD_CENTER_X: i64 = 540;
+const FOD_CENTER_Y: i64 = 2172;
+const FOD_ICON_SIZE: i64 = 340;
+
+fn fod_top_left() -> (i64, i64) {
+    (
+        FOD_CENTER_X - FOD_ICON_SIZE / 2,
+        FOD_CENTER_Y - FOD_ICON_SIZE / 2,
+    )
+}
+
 static HBM_ON: AtomicBool = AtomicBool::new(false);
 static FINGER_DOWN: AtomicBool = AtomicBool::new(false);
 static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -219,9 +234,10 @@ fn spawn_session_watcher() {
 
 fn in_fod_area(x_raw: i64, y_raw: i64) -> bool {
     // mtk-tpd reports 0..17279 / 0..38399 = 16x the 1080x2400 panel.
-    let dx = x_raw / 16 - 540;
-    let dy = y_raw / 16 - 2178;
-    (dx * dx + dy * dy) <= 140 * 140
+    let dx = x_raw / 16 - FOD_CENTER_X;
+    let dy = y_raw / 16 - FOD_CENTER_Y;
+    let radius = FOD_ICON_SIZE / 2;
+    (dx * dx + dy * dy) <= radius * radius
 }
 
 fn spawn_input_watcher() {
@@ -372,13 +388,23 @@ fn prop_set(name: &str, value: &str) {
     let _ = Command::new("/system/bin/setprop").args([name, value]).status();
 }
 
+/// Geometry must win over a stale value from an older build, so always write.
+fn prop_set_force(name: &str, value: &str) {
+    let _ = Command::new("/system/bin/setprop").args([name, value]).status();
+}
+
 fn setup_props() {
     prop_set("ro.hardware.fp.fod", "1");
     prop_set("ro.hardware.fp.fod.c", "1");
     prop_set("ro.hardware.fp.fod.location", "low");
     prop_set("ro.vendor.localhbm.enable", "1");
-    prop_set("persist.vendor.sys.fp.fod.location.X_Y", "540,2178");
-    prop_set("persist.vendor.sys.fp.fod.size.width_height", "220,220");
+    let (x, y) = fod_top_left();
+    let size = FOD_ICON_SIZE.to_string();
+    prop_set_force(
+        "persist.vendor.sys.fp.fod.location.X_Y",
+        &format!("{x},{y}"),
+    );
+    prop_set_force("persist.vendor.sys.fp.fod.size.width_height", &size);
     prop_set("persist.vendor.sys.fp.vendor", "goodix");
     prop_set("persist.vendor.fingerprint.sensor_type", "optical");
     prop_set("vendor.fingerprint.aidl.support", "1");
@@ -484,4 +510,23 @@ fn main() -> Result<(), anyhow::Error> {
 
     rsbinder::ProcessState::join_thread_pool()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fod_icon_is_centered_on_the_sensor() {
+        assert_eq!(fod_top_left(), (370, 2002));
+
+        let cx = FOD_CENTER_X * 16;
+        let cy = FOD_CENTER_Y * 16;
+        assert!(in_fod_area(cx, cy));
+
+        let edge = (FOD_ICON_SIZE / 2) * 16;
+        assert!(in_fod_area(cx + edge, cy));
+        assert!(!in_fod_area(cx + edge + 16, cy));
+        assert!(!in_fod_area(cx + edge, cy + edge + 16));
+    }
 }
