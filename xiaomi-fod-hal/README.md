@@ -19,8 +19,8 @@ Masalahnya: vendor Transsion cuma sediakan `android.hardware.biometrics.fingerpr
 3. Watchdog 15 detik: HBM otomatis dimatikan kalau tidak ada refresh (anti burn-in).
 4. Set prop FOD MIUI kalau masih kosong:
    - `ro.hardware.fp.fod=1`, `ro.hardware.fp.fod.c=1`
-   - `persist.vendor.sys.fp.fod.location.X_Y=370,2002`
-   - `persist.vendor.sys.fp.fod.size.width_height=340,340`
+   - `persist.vendor.sys.fp.fod.location.X_Y=430,2062`
+   - `persist.vendor.sys.fp.fod.size.width_height=220,220`
    - `persist.vendor.fingerprint.sensor_type=optical`
    - `vendor.fingerprint.aidl.support=1`
 5. `ITouchFeature.setModeValue(type, 10, value)` juga me-refresh HBM.

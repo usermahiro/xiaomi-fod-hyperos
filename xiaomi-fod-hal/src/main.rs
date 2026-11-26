@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::io::AsRawFd;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
@@ -32,7 +33,7 @@ const TOUCH_NODE: &str = "/dev/input/event4";
 /// (persist.vendor.fingerprint.optical.sensorlocation = 540::2172).
 const FOD_CENTER_X: i64 = 540;
 const FOD_CENTER_Y: i64 = 2172;
-const FOD_ICON_SIZE: i64 = 340;
+const FOD_ICON_SIZE: i64 = 220;
 
 fn fod_top_left() -> (i64, i64) {
     (
@@ -240,6 +241,149 @@ fn in_fod_area(x_raw: i64, y_raw: i64) -> bool {
     (dx * dx + dy * dy) <= radius * radius
 }
 
+// ------------------------------------------------------------- FPS lock on FOD
+//
+// While a finger is on the sensor, force 120Hz so the capture is stable. Three
+// seconds after the finger lifts, put every refresh-rate setting back to what
+// it was before the press.
+
+const FPS_LOCK_HZ: &str = "120";
+const FPS_RESTORE_DELAY: Duration = Duration::from_secs(3);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FpsSnapshot {
+    peak: Option<String>,
+    min: Option<String>,
+    user_secure: Option<String>,
+    user_system: Option<String>,
+    miui: Option<String>,
+    dfps: Option<String>,
+}
+
+static FPS_SNAPSHOT: Mutex<Option<FpsSnapshot>> = Mutex::new(None);
+static FPS_GEN: AtomicU64 = AtomicU64::new(0);
+
+fn prop_get_opt(key: &str) -> Option<String> {
+    let out = Command::new("/system/bin/getprop").arg(key).output().ok()?;
+    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn settings_get(ns: &str, key: &str) -> Option<String> {
+    let out = Command::new("/system/bin/settings")
+        .args(["get", ns, key])
+        .output()
+        .ok()?;
+    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if value.is_empty() || value == "null" {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn settings_put(ns: &str, key: &str, value: &str) {
+    if let Err(e) = Command::new("/system/bin/settings")
+        .args(["put", ns, key, value])
+        .status()
+    {
+        tracing::warn!("[FPS] settings put {ns} {key}={value} failed: {e}");
+    }
+}
+
+fn capture_fps() -> FpsSnapshot {
+    FpsSnapshot {
+        peak: settings_get("system", "peak_refresh_rate"),
+        min: settings_get("system", "min_refresh_rate"),
+        user_secure: settings_get("secure", "user_refresh_rate"),
+        user_system: settings_get("system", "user_refresh_rate"),
+        miui: settings_get("secure", "miui_refresh_rate"),
+        dfps: prop_get_opt("persist.vendor.dfps.level"),
+    }
+}
+
+fn fps_values(snap: &FpsSnapshot, lock: bool) -> (String, String) {
+    let peak = if lock {
+        FPS_LOCK_HZ.to_string()
+    } else {
+        snap.peak.clone().unwrap_or_else(|| FPS_LOCK_HZ.to_string())
+    };
+    let min = if lock {
+        FPS_LOCK_HZ.to_string()
+    } else {
+        snap.min.clone().unwrap_or_else(|| FPS_LOCK_HZ.to_string())
+    };
+    (peak, min)
+}
+
+fn write_fps(snap: &FpsSnapshot, lock: bool) {
+    let (peak, min) = fps_values(snap, lock);
+    let (peak, min) = (peak.as_str(), min.as_str());
+    settings_put("system", "peak_refresh_rate", peak);
+    settings_put("system", "min_refresh_rate", min);
+    if lock {
+        for (ns, key) in [
+            ("secure", "user_refresh_rate"),
+            ("system", "user_refresh_rate"),
+            ("secure", "miui_refresh_rate"),
+        ] {
+            settings_put(ns, key, FPS_LOCK_HZ);
+        }
+        let _ = Command::new("/system/bin/setprop")
+            .args(["persist.vendor.dfps.level", FPS_LOCK_HZ])
+            .status();
+    } else {
+        if let Some(v) = &snap.user_secure {
+            settings_put("secure", "user_refresh_rate", v);
+        }
+        if let Some(v) = &snap.user_system {
+            settings_put("system", "user_refresh_rate", v);
+        }
+        if let Some(v) = &snap.miui {
+            settings_put("secure", "miui_refresh_rate", v);
+        }
+        if let Some(v) = &snap.dfps {
+            let _ = Command::new("/system/bin/setprop")
+                .args(["persist.vendor.dfps.level", v])
+                .status();
+        }
+    }
+    tracing::info!("[FPS] {} (peak={peak}, min={min})", if lock { "lock 120Hz" } else { "restore" });
+}
+
+fn fps_lock() {
+    if let Ok(mut guard) = FPS_SNAPSHOT.lock() {
+        if guard.is_none() {
+            *guard = Some(capture_fps());
+        }
+    }
+    FPS_GEN.fetch_add(1, Ordering::SeqCst);
+    if let Some(snap) = FPS_SNAPSHOT.lock().unwrap().as_ref() {
+        write_fps(snap, true);
+    }
+}
+
+fn fps_release_after_delay() {
+    let gen = FPS_GEN.load(Ordering::SeqCst);
+    std::thread::spawn(move || {
+        std::thread::sleep(FPS_RESTORE_DELAY);
+        if gen != FPS_GEN.load(Ordering::SeqCst) {
+            return;
+        }
+        if FINGER_DOWN.load(Ordering::SeqCst) {
+            return;
+        }
+        let snap = FPS_SNAPSHOT.lock().unwrap().take();
+        if let Some(snap) = snap {
+            write_fps(&snap, false);
+        }
+    });
+}
+
 fn spawn_input_watcher() {
     std::thread::spawn(move || loop {
         let child = Command::new("/system/bin/getevent")
@@ -275,6 +419,7 @@ fn spawn_input_watcher() {
                             tracing::info!("[Input] finger lifted");
                             inject_fod_key(0);
                             disarm("finger-up");
+                            fps_release_after_delay();
                         }
                         _ => {}
                     }
@@ -297,10 +442,12 @@ fn spawn_input_watcher() {
                             tracing::info!("[Input] FOD down x={x} y={y}");
                             inject_fod_key(1);
                             arm("finger-down");
+                            fps_lock();
                         }
                     } else if FINGER_DOWN.swap(false, Ordering::SeqCst) {
                         inject_fod_key(0);
                         disarm("finger-up");
+                        fps_release_after_delay();
                     }
                 }
             }
@@ -518,7 +665,7 @@ mod tests {
 
     #[test]
     fn fod_icon_is_centered_on_the_sensor() {
-        assert_eq!(fod_top_left(), (370, 2002));
+        assert_eq!(fod_top_left(), (430, 2062));
 
         let cx = FOD_CENTER_X * 16;
         let cy = FOD_CENTER_Y * 16;
@@ -528,5 +675,20 @@ mod tests {
         assert!(in_fod_area(cx + edge, cy));
         assert!(!in_fod_area(cx + edge + 16, cy));
         assert!(!in_fod_area(cx + edge, cy + edge + 16));
+    }
+
+    #[test]
+    fn fps_lock_overrides_and_restore_uses_snapshot() {
+        let snap = FpsSnapshot {
+            peak: Some("90.0".into()),
+            min: Some("60.0".into()),
+            user_secure: Some("90".into()),
+            user_system: Some("90".into()),
+            miui: Some("90".into()),
+            dfps: Some("90".into()),
+        };
+        assert_eq!(fps_values(&snap, true), ("120".into(), "120".into()));
+        assert_eq!(fps_values(&snap, false), ("90.0".into(), "60.0".into()));
+        assert_eq!(FPS_RESTORE_DELAY, Duration::from_secs(3));
     }
 }
