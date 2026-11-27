@@ -63,7 +63,7 @@ those as session bookkeeping and they can outlive the actual touch. Instead:
 * Re-issue one KEY 0xC3 DOWN after HBM is lit: Goodix only captures on that key, and in deep sleep the kernel FOD key fires before a session exists. Single refire, 350 ms hold — no repeated re-arm.
 * `authenticate()` no longer clears HBM (MIUI may call it after the touch already lit the panel).
 * Startup always clears HBM.
-* **FPS lock while FOD is pressed:** pressing the sensor snapshots the active refresh-rate settings (`peak_refresh_rate`, `min_refresh_rate`, `user_refresh_rate`, `miui_refresh_rate`, `persist.vendor.dfps.level`) and pins them to the currently selected rate (120Hz, 144Hz, ...). 3 seconds after finger lift, the snapshot is restored.
+* **FPS lock while FOD is pressed:** pressing the sensor snapshots `peak_refresh_rate` and `min_refresh_rate`, then pins both to `120.0` to avoid HBM/144Hz panel scan conflicts. Finger lift restores the saved rates after 3 seconds.
 
 Node: `/sys/kernel/tran_display/lcm_hbm_state`. Reading it returns a hex
 register value (e.g. `0xFA`), **not** `"1"`/`"0xOK"` — do not poll it as a

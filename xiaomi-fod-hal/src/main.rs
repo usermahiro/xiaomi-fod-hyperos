@@ -247,31 +247,17 @@ fn in_fod_area(x_raw: i64, y_raw: i64) -> bool {
 // seconds after the finger lifts, put every refresh-rate setting back to what
 // it was before the press.
 
-const FPS_FALLBACK_HZ: i32 = 120;
+const FPS_LOCK_HZ: i32 = 120;
 const FPS_RESTORE_DELAY: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FpsSnapshot {
     peak: Option<String>,
     min: Option<String>,
-    user_secure: Option<String>,
-    user_system: Option<String>,
-    miui: Option<String>,
-    dfps: Option<String>,
 }
 
 static FPS_SNAPSHOT: Mutex<Option<FpsSnapshot>> = Mutex::new(None);
 static FPS_GEN: AtomicU64 = AtomicU64::new(0);
-
-fn prop_get_opt(key: &str) -> Option<String> {
-    let out = Command::new("/system/bin/getprop").arg(key).output().ok()?;
-    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
 
 fn settings_get(ns: &str, key: &str) -> Option<String> {
     let out = Command::new("/system/bin/settings")
@@ -299,84 +285,33 @@ fn capture_fps() -> FpsSnapshot {
     FpsSnapshot {
         peak: settings_get("system", "peak_refresh_rate"),
         min: settings_get("system", "min_refresh_rate"),
-        user_secure: settings_get("secure", "user_refresh_rate"),
-        user_system: settings_get("system", "user_refresh_rate"),
-        miui: settings_get("secure", "miui_refresh_rate"),
-        dfps: prop_get_opt("persist.vendor.dfps.level"),
     }
 }
 
-fn parse_hz(value: Option<&str>) -> Option<i32> {
-    let hz = value?.parse::<f64>().ok()?.round() as i32;
-    if (60..=144).contains(&hz) {
-        Some(hz)
-    } else {
-        None
-    }
-}
-
-/// Which rate to pin while the sensor is pressed. Use the rate actually
-/// selected by the user (120, 144, ...) so a 144Hz user does not get dropped
-/// to 120Hz during the capture.
-fn lock_hz(snap: &FpsSnapshot) -> i32 {
-    parse_hz(snap.peak.as_deref())
-        .or_else(|| parse_hz(snap.dfps.as_deref()))
-        .or_else(|| parse_hz(snap.user_secure.as_deref()))
-        .or_else(|| parse_hz(snap.user_system.as_deref()))
-        .unwrap_or(FPS_FALLBACK_HZ)
-}
-
-fn fps_values(snap: &FpsSnapshot, lock: bool, hz: i32) -> (String, String) {
-    let fallback = FPS_FALLBACK_HZ.to_string();
+fn fps_values(snap: &FpsSnapshot, lock: bool) -> (String, String) {
+    let fallback = FPS_LOCK_HZ.to_string();
     let peak = if lock {
-        hz.to_string()
+        fallback.clone()
     } else {
         snap.peak.clone().unwrap_or(fallback.clone())
     };
     let min = if lock {
-        hz.to_string()
+        fallback
     } else {
-        snap.min.clone().unwrap_or(fallback)
+        snap.min.clone().unwrap_or_else(|| FPS_LOCK_HZ.to_string())
     };
     (peak, min)
 }
 
-fn write_fps(snap: &FpsSnapshot, lock: bool, hz: i32) {
-    let (peak, min) = fps_values(snap, lock, hz);
-    let (peak, min) = (peak.as_str(), min.as_str());
-    settings_put("system", "peak_refresh_rate", peak);
-    settings_put("system", "min_refresh_rate", min);
-    let hz_str = hz.to_string();
-    if lock {
-        for (ns, key) in [
-            ("secure", "user_refresh_rate"),
-            ("system", "user_refresh_rate"),
-            ("secure", "miui_refresh_rate"),
-        ] {
-            settings_put(ns, key, &hz_str);
-        }
-        let _ = Command::new("/system/bin/setprop")
-            .args(["persist.vendor.dfps.level", &hz_str])
-            .status();
-    } else {
-        if let Some(v) = &snap.user_secure {
-            settings_put("secure", "user_refresh_rate", v);
-        }
-        if let Some(v) = &snap.user_system {
-            settings_put("system", "user_refresh_rate", v);
-        }
-        if let Some(v) = &snap.miui {
-            settings_put("secure", "miui_refresh_rate", v);
-        }
-        if let Some(v) = &snap.dfps {
-            let _ = Command::new("/system/bin/setprop")
-                .args(["persist.vendor.dfps.level", v])
-                .status();
-        }
-    }
+fn write_fps(snap: &FpsSnapshot, lock: bool) {
+    let (peak, min) = fps_values(snap, lock);
+    settings_put("system", "peak_refresh_rate", &peak);
+    settings_put("system", "min_refresh_rate", &min);
     tracing::info!(
-        "[FPS] {} (peak={peak}, min={min}, hz={hz})",
-        if lock { "lock" } else { "restore" }
+        "[FPS] {} (peak={}, min={})",
+        if lock { "lock 120Hz" } else { "restore" },
+        peak,
+        min
     );
 }
 
@@ -388,7 +323,7 @@ fn fps_lock() {
     }
     FPS_GEN.fetch_add(1, Ordering::SeqCst);
     if let Some(snap) = FPS_SNAPSHOT.lock().unwrap().as_ref() {
-        write_fps(snap, true, lock_hz(snap));
+        write_fps(snap, true);
     }
 }
 
@@ -404,7 +339,7 @@ fn fps_release_after_delay() {
         }
         let snap = FPS_SNAPSHOT.lock().unwrap().take();
         if let Some(snap) = snap {
-            write_fps(&snap, false, 0);
+            write_fps(&snap, false);
         }
     });
 }
@@ -703,25 +638,13 @@ mod tests {
     }
 
     #[test]
-    fn fps_lock_uses_selected_rate_and_restore_uses_snapshot() {
+    fn fps_lock_pins_120_and_restore_uses_snapshot() {
         let snap = FpsSnapshot {
             peak: Some("144.0".into()),
             min: Some("60.0".into()),
-            user_secure: Some("144".into()),
-            user_system: Some("144".into()),
-            miui: Some("144".into()),
-            dfps: Some("144".into()),
         };
-        assert_eq!(lock_hz(&snap), 144);
-        assert_eq!(fps_values(&snap, true, 144), ("144".into(), "144".into()));
-        assert_eq!(fps_values(&snap, false, 0), ("144.0".into(), "60.0".into()));
-
-        let snap120 = FpsSnapshot {
-            peak: Some("120.0".into()),
-            ..snap.clone()
-        };
-        assert_eq!(lock_hz(&snap120), 120);
-        assert_eq!(fps_values(&snap120, true, 120), ("120".into(), "120".into()));
+        assert_eq!(fps_values(&snap, true), ("120".into(), "120".into()));
+        assert_eq!(fps_values(&snap, false), ("144.0".into(), "60.0".into()));
         assert_eq!(FPS_RESTORE_DELAY, Duration::from_secs(3));
     }
 }
