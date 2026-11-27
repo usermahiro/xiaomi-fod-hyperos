@@ -1078,6 +1078,7 @@ impl FingerprintHal {
         }
         self.step_captured.store(false, Ordering::SeqCst);
         self.auth_rearm_count.store(0, Ordering::SeqCst);
+        crate::refresh::request_lock();
         log_info!(
             "on_pointer_down at ({}, {}) (screen_state={}) -> activating HBM & optical capture",
             x, y, screen_state
@@ -1094,11 +1095,15 @@ impl FingerprintHal {
             crate::input::acquire_wakelock("oplus_udfps_fod_wake");
         }
 
+        if !crate::refresh::wait_locked(crate::refresh::LOCK_WAIT_MS) {
+            log_warn!("refresh: 120fps lock not confirmed in time, continuing with HBM");
+        }
         crate::hbm::set_hbm(true);
 
         if !self.is_finger_down.load(Ordering::SeqCst) {
             log_info!("Finger lifted during optical sync delay, aborting capture");
             crate::hbm::set_hbm(false);
+            crate::refresh::release();
             if self.get_screen_state() == 0 {
                 crate::input::release_wakelock("oplus_udfps_fod_wake");
             }
@@ -1110,6 +1115,7 @@ impl FingerprintHal {
         if !self.is_finger_down.load(Ordering::SeqCst) {
             log_info!("Finger lifted during settling delay, aborting capture");
             crate::hbm::set_hbm(false);
+            crate::refresh::release();
             if self.get_screen_state() == 0 {
                 crate::input::release_wakelock("oplus_udfps_fod_wake");
             }
@@ -1143,6 +1149,7 @@ impl FingerprintHal {
         }
 
         crate::hbm::set_hbm(false);
+        crate::refresh::release();
 
         self.send_custom_cmd(11, 0, 0x10001, 0);
 
